@@ -53,3 +53,53 @@ def test_stitch_single_input_works(tmp_path: Path):
     out = tmp_path / "out.mp3"
     stitch_mp3s([a], out)
     assert out.exists() and out.stat().st_size > 0
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_stitch_inter_chunk_silence_inserted_between_chunks(tmp_path: Path):
+    """1.0s silence between every pair of chunks. Two 200ms chunks +
+    one 1.0s silence between = ~1.4s total."""
+    a, b = tmp_path / "a.mp3", tmp_path / "b.mp3"
+    _silence_mp3(a, 0.2)
+    _silence_mp3(b, 0.2)
+    out = tmp_path / "out.mp3"
+    stitch_mp3s([a, b], out, inter_chunk_silence_seconds=1.0)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    duration = float(probe.stdout.strip())
+    assert 1.3 < duration < 1.6, f"expected ~1.4s, got {duration}s"
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_stitch_inter_chunk_silence_no_op_on_single_chunk(tmp_path: Path):
+    """No silence inserted when there's only one chunk (no boundary)."""
+    a = tmp_path / "a.mp3"
+    _silence_mp3(a, 0.2)
+    out = tmp_path / "out.mp3"
+    stitch_mp3s([a], out, inter_chunk_silence_seconds=2.0)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    duration = float(probe.stdout.strip())
+    assert duration < 0.5, f"expected ~0.2s, got {duration}s"
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_stitch_inter_chunk_silence_disabled_when_zero(tmp_path: Path):
+    a, b = tmp_path / "a.mp3", tmp_path / "b.mp3"
+    _silence_mp3(a, 0.2)
+    _silence_mp3(b, 0.2)
+    out = tmp_path / "out.mp3"
+    stitch_mp3s([a, b], out, inter_chunk_silence_seconds=0.0)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    duration = float(probe.stdout.strip())
+    assert 0.3 < duration < 0.6, f"expected ~0.4s, got {duration}s"

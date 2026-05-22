@@ -23,6 +23,13 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Write MP3 to FILE instead of stdout.")
     p.add_argument("--no-cache", action="store_true",
                    help="Bypass the chunk cache for this run.")
+    p.add_argument("--paragraph-silence", type=float, default=1.5,
+                   metavar="SECONDS",
+                   help="Insert SECONDS of silence between every concatenated "
+                        "chunk at stitch time (default 1.5s). Empirically Fish "
+                        "s2-pro drops `[pause]` tags at chunk edges, so this "
+                        "is the only reliable way to get real paragraph beats "
+                        "in the final audio. Set 0 to disable.")
     return p
 
 
@@ -109,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
             parts.append(p)
         out_path = args.output if args.output is not None else td_path / "out.mp3"
         try:
-            stitch_mp3s(parts, out_path)
+            stitch_mp3s(
+                parts, out_path,
+                inter_chunk_silence_seconds=args.paragraph_silence,
+            )
         except StitchError as e:
             _log(f"error: {e}")
             return 4
