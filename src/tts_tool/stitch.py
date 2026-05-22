@@ -49,33 +49,48 @@ def _generate_silence(tmpdir: Path, seconds: float) -> Path:
 
 
 def stitch_mp3s(
-    parts: list[Path],
+    parts: list[Path] | list[tuple[Path, float]],
     output: Path,
-    *,
-    inter_chunk_silence_seconds: float = 0.0,
 ) -> None:
-    """Concatenate `parts` into `output`. If `inter_chunk_silence_seconds`
-    > 0, a silent MP3 of that duration is interleaved between every
-    pair of chunks (no leading/trailing silence)."""
+    """Concatenate `parts` into `output`. Each part is either a bare
+    `Path` (no silence after) OR a `(Path, silence_after_seconds)`
+    tuple. A silent MP3 of `silence_after_seconds` is appended after
+    that chunk in the concat list. Mixed-form input is supported for
+    back-compat with bare-path callers."""
     if not parts:
         raise StitchError("no inputs to stitch")
     if shutil.which("ffmpeg") is None:
         raise StitchError("ffmpeg not on PATH")
 
+    # Normalize input to list of (Path, silence_after) tuples
+    normalized: list[tuple[Path, float]] = []
+    for entry in parts:
+        if isinstance(entry, tuple):
+            normalized.append((entry[0], float(entry[1])))
+        else:
+            normalized.append((entry, 0.0))
+
     with tempfile.TemporaryDirectory(prefix="tts-tool-stitch-") as td:
         td_path = Path(td)
-        silence_path: Path | None = None
-        if inter_chunk_silence_seconds > 0 and len(parts) > 1:
-            silence_path = _generate_silence(td_path, inter_chunk_silence_seconds)
+        # Cache silences by duration so the same value is reused
+        silences: dict[float, Path] = {}
+
+        def silence_for(secs: float) -> Path:
+            if secs not in silences:
+                silences[secs] = _generate_silence(td_path, secs)
+            return silences[secs]
 
         list_path = td_path / "concat.txt"
         with list_path.open("w", encoding="utf-8") as f:
-            for i, p in enumerate(parts):
-                if i > 0 and silence_path is not None:
-                    abs_sil = str(silence_path.resolve()).replace("'", r"'\''")
-                    f.write(f"file '{abs_sil}'\n")
+            for i, (p, sil_after) in enumerate(normalized):
                 abs_p = str(p.resolve()).replace("'", r"'\''")
                 f.write(f"file '{abs_p}'\n")
+                # Append silence AFTER, except after the last chunk (no
+                # listener wants the article to end on silence)
+                is_last = i == len(normalized) - 1
+                if sil_after > 0 and not is_last:
+                    abs_sil = str(silence_for(sil_after).resolve()).replace("'", r"'\''")
+                    f.write(f"file '{abs_sil}'\n")
 
         result = subprocess.run(
             [
