@@ -23,12 +23,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Write MP3 to FILE instead of stdout.")
     p.add_argument("--no-cache", action="store_true",
                    help="Bypass the chunk cache for this run.")
-    p.add_argument("-j", "--concurrency", type=int, default=8,
+    p.add_argument("-j", "--concurrency", type=int, default=3,
                    metavar="N",
                    help="Synthesize up to N chunks in parallel against the "
-                        "Fish API (default 8). Paragraph-dense prose typically "
+                        "Fish API (default 3). Paragraph-dense prose typically "
                         "produces 30-50 chunks; serial synth dominates wall "
-                        "time. 1 = strict serial.")
+                        "time. Higher concurrency trips Fish's per-key rate "
+                        "limit (HTTP 429); 3 is empirically safe. 1 = strict "
+                        "serial.")
     return p
 
 
