@@ -11,6 +11,12 @@ from . import chunk as chunkmod
 from . import cache, synthesize
 from .stitch import StitchError, stitch_mp3s
 
+# Fish Audio voice library reference_id. "Adrian — A steady and reliable
+# narrator", male/middle-aged/deep/measured/serious; sounded clean on
+# long-form prose during empirical testing 2026-05-22. Switch with
+# --voice-id or FISH_AUDIO_VOICE_ID env.
+DEFAULT_VOICE_ID = "bf322df2096a46f18c579d0baa36f41d"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -23,6 +29,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Write MP3 to FILE instead of stdout.")
     p.add_argument("--no-cache", action="store_true",
                    help="Bypass the chunk cache for this run.")
+    p.add_argument("--voice-id", type=str, default=None, metavar="ID",
+                   help="Fish Audio voice library reference_id (32-hex). "
+                        "Overrides FISH_AUDIO_VOICE_ID env. Default: Adrian "
+                        f"({DEFAULT_VOICE_ID[:8]}...), 'steady reliable "
+                        "narrator', empirically good for long-form prose. "
+                        "Browse Fish's library via SDK voices.list().")
     p.add_argument("-j", "--concurrency", type=int, default=3,
                    metavar="N",
                    help="Synthesize up to N chunks in parallel against the "
@@ -73,7 +85,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     model = os.environ.get("FISH_AUDIO_MODEL", "s2-pro").strip() or "s2-pro"
-    voice_id = os.environ.get("FISH_AUDIO_VOICE_ID", "").strip() or None
+    voice_id = (
+        args.voice_id
+        or os.environ.get("FISH_AUDIO_VOICE_ID", "").strip()
+        or DEFAULT_VOICE_ID
+    )
     speed = float(os.environ.get("LISTEN_SPEED", "1.0"))
     cache_root = os.environ.get("LISTEN_CACHE_DIR") or None
 
