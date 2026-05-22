@@ -1,28 +1,41 @@
-"""Pause-annotation-driven chunker.
+"""Pause-annotation-driven chunker (Fish Audio Story-Studio pattern).
 
 Input text may contain Fish s2-pro prosody tags. PAUSE-SHAPED tags
 (`[short pause]`, `[long pause]`, `[very long pause]`, `[pause]`,
 `[N second pause]`, `[pause for two seconds]`, etc.) are STRUCTURAL:
 they are application-layer instructions to insert a silence of a
-specified duration. Fish s2-pro empirically DROPS pause tags at
-chunk edges (probe 2026-05-22: end-of-text and start-of-text both
-render as no-op), so relying on Fish to interpret them is unreliable.
+specified duration.
 
-This chunker parses pause-shaped tags out of the input, splits the
-text into Fish-callable SEGMENTS at each tag, and emits Chunk objects
-that carry a `silence_after` duration. The stitcher concatenates
-chunks with silence-MP3s of that duration between them. The annotation
-drives both the chunking AND the pause length — single source of
-truth at the application layer.
+Empirically (probe 2026-05-22, 26 author-side variants) Fish s2-pro
+has a HARD CEILING of ~1.0s on any silence requested via input syntax —
+documented + confirmed by Fish maintainers on github.com/fishaudio/
+fish-speech#896: "Currently our open source model can't achieve this".
+Tags are tokenized as ordinary text and conditioned on a Slow-AR
+transformer whose training distribution caps intra-utterance pauses
+at ~1.5s. There is no hidden TTSConfig field, no SSML, no FlushEvent,
+no voice ID that breaks this. Fish's own first-party answer for
+multi-second beats is Story Studio: per-block synthesis + concat
+with explicit silence (gap bubbles, 0.2-5s editable).
+
+This chunker implements Story Studio's pattern client-side: parse
+pause-shaped tags out of input, split text into Fish-callable
+SEGMENTS at each tag, emit Chunk objects carrying a `silence_after`
+duration. The stitcher concatenates chunks with silence-MP3s of that
+duration between them. The annotation drives both the chunking AND
+the pause length — single source of truth at the application layer.
 
 Non-pause tags (`[emphasis]`, `[thoughtfully]`, `[reading aloud]`,
 `[back to narration]`, etc.) remain inline in the segment text for
 Fish to render — those are PROSODIC tags Fish handles correctly
-mid-text.
+mid-text (within the ~1s ceiling).
 
 If a segment between pause tags is too long for Fish (>= TARGET_CHARS),
 it is sentence-pack-split into multiple chunks; consecutive chunks of
 the same logical segment carry `silence_after=0` between them.
+
+Cost: paragraph-dense prose produces one Fish call per paragraph
+boundary. Mitigated by parallel synthesis in cli.py — N chunks can
+synth concurrently against Fish's rate limit.
 """
 from __future__ import annotations
 

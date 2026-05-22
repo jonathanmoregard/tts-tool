@@ -23,6 +23,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Write MP3 to FILE instead of stdout.")
     p.add_argument("--no-cache", action="store_true",
                    help="Bypass the chunk cache for this run.")
+    p.add_argument("-j", "--concurrency", type=int, default=8,
+                   metavar="N",
+                   help="Synthesize up to N chunks in parallel against the "
+                        "Fish API (default 8). Paragraph-dense prose typically "
+                        "produces 30-50 chunks; serial synth dominates wall "
+                        "time. 1 = strict serial.")
     return p
 
 
@@ -73,27 +79,46 @@ def main(argv: list[str] | None = None) -> int:
     client = synthesize.make_client(api_key)
 
     n = len(chunks)
-    audio_per_chunk: list[bytes] = []
+    audio_per_chunk: list[bytes | None] = [None] * n
     cache_hits = 0
-    for c in chunks:
+    to_synth: list[tuple[int, object, str]] = []  # (slot, chunk, cache_key)
+    for slot, c in enumerate(chunks):
         key = cache.key_for(c.text, model, voice_id, speed)
         cached = None if args.no_cache else cache.get(cdir, key)
         if cached is not None:
             cache_hits += 1
             _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
-            audio_per_chunk.append(cached)
+            audio_per_chunk[slot] = cached
             continue
-        _log(f"chunk {c.index + 1}/{n}: synthesizing ({len(c.text)} chars)")
-        try:
+        to_synth.append((slot, c, key))
+
+    if to_synth:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        concurrency = max(1, args.concurrency)
+        _log(f"synthesizing {len(to_synth)} chunks (concurrency={concurrency})")
+
+        def _do_one(slot: int, c, key: str):
             audio = synthesize.synthesize_chunk(
                 client, c.text, model=model, voice_id=voice_id, speed=speed,
             )
-        except Exception as e:
-            _log(f"error: Fish Audio synthesis failed on chunk {c.index + 1}: {e}")
-            return 1
-        if not args.no_cache:
-            cache.put(cdir, key, audio)
-        audio_per_chunk.append(audio)
+            return slot, c, key, audio
+
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_do_one, slot, c, key) for slot, c, key in to_synth]
+            for fut in as_completed(futures):
+                try:
+                    slot, c, key, audio = fut.result()
+                except Exception as e:
+                    _log(f"error: Fish Audio synthesis failed: {e}")
+                    return 1
+                if not args.no_cache:
+                    cache.put(cdir, key, audio)
+                audio_per_chunk[slot] = audio
+                _log(f"chunk {c.index + 1}/{n}: done ({len(c.text)} chars)")
+
+    # All slots must be filled by now (cache hit or successful synth).
+    assert all(a is not None for a in audio_per_chunk), "synth slot left empty"
+    audio_per_chunk = [a for a in audio_per_chunk if a is not None]
 
     if len(audio_per_chunk) == 1:
         _write_output(audio_per_chunk[0], args.output)
