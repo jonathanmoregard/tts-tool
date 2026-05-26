@@ -7,6 +7,22 @@ echo "Hello world." | tts-tool -o hello.mp3
 substack-url-tool "$URL" | tts-tool -o article.mp3
 ```
 
+## Voice cloning
+
+```sh
+# From an existing recording:
+tts-tool clone --sample me.wav --title "My voice"
+
+# Captured inline (60s via pw-record / arecord / ffmpeg):
+tts-tool clone --record 60 --title "My voice"
+
+# Both (combined into one upload):
+tts-tool clone --sample me.wav --record 30 --title "My voice"
+```
+
+Prints the new Fish Audio `reference_id`. Plug into synth via
+`--voice-id ID` or `export FISH_AUDIO_VOICE_ID=ID`.
+
 ## Install (dev)
 
 ```sh
@@ -62,6 +78,6 @@ rm -rf "$(python -c 'from platformdirs import user_cache_dir; print(user_cache_d
 
 - English only.
 - Cloud TTS (Fish Audio) only. No self-hosted backend.
-- No voice cloning, no multi-speaker, no streaming playback.
+- No multi-speaker, no streaming playback.
 - No RSS / podcast feed generation (separate tool, later).
 - `ffmpeg` must be on PATH (Nix flake handles this).

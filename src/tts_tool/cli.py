@@ -3,25 +3,26 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from . import chunk as chunkmod
-from . import cache, synthesize
+from . import cache, clone, record, synthesize
 from .stitch import StitchError, stitch_mp3s
 
-# Fish Audio voice library reference_id. "Adrian — A steady and reliable
-# narrator", male/middle-aged/deep/measured/serious; sounded clean on
-# long-form prose during empirical testing 2026-05-22. Switch with
-# --voice-id or FISH_AUDIO_VOICE_ID env.
-DEFAULT_VOICE_ID = "bf322df2096a46f18c579d0baa36f41d"
+# Fish Audio voice library reference_id. Cloned from a 90s sample of
+# Jonathan Moregard reading English prose on 2026-05-26 via the clone
+# subcommand below. Switch with --voice-id or FISH_AUDIO_VOICE_ID env.
+DEFAULT_VOICE_ID = "282fa853838548af9803ed5b78226253"
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="tts-tool",
-        description="Convert CleanText on stdin (or -i FILE) to MP3 via Fish Audio.",
+        description="Convert CleanText on stdin (or -i FILE) to MP3 via Fish Audio. "
+                    "Use `tts-tool clone --help` to upload a voice sample.",
     )
     p.add_argument("-i", "--input", type=Path, default=None,
                    help="Read CleanText from FILE instead of stdin.")
@@ -31,9 +32,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Bypass the chunk cache for this run.")
     p.add_argument("--voice-id", type=str, default=None, metavar="ID",
                    help="Fish Audio voice library reference_id (32-hex). "
-                        "Overrides FISH_AUDIO_VOICE_ID env. Default: Adrian "
-                        f"({DEFAULT_VOICE_ID[:8]}...), 'steady reliable "
-                        "narrator', empirically good for long-form prose. "
+                        "Overrides FISH_AUDIO_VOICE_ID env. Default: "
+                        f"Jonathan-cloned ({DEFAULT_VOICE_ID[:8]}...). "
                         "Browse Fish's library via SDK voices.list().")
     p.add_argument("-j", "--concurrency", type=int, default=3,
                    metavar="N",
@@ -65,7 +65,102 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _build_clone_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="tts-tool clone",
+        description="Clone a voice via Fish Audio. Uploads one or more sample "
+                    "audio files, prints the new reference_id. Plug that id into "
+                    "`tts-tool --voice-id <id>` or `FISH_AUDIO_VOICE_ID` env.",
+    )
+    p.add_argument("--sample", type=Path, action="append", default=None,
+                   metavar="FILE",
+                   help="Path to a voice sample (WAV/MP3/FLAC/M4A/OGG; "
+                        "anything Fish accepts). Repeatable. At least one of "
+                        "--sample or --record is required; both may be combined.")
+    p.add_argument("--record", type=float, default=None, metavar="SECONDS",
+                   help="Capture a fresh sample inline for SECONDS via "
+                        "pw-record (PipeWire), arecord (ALSA), or ffmpeg "
+                        "(PulseAudio) — whichever is on PATH. Saved to a temp "
+                        "WAV, appended to the sample list. Recording starts "
+                        "immediately; use Ctrl-C to abort before the timer.")
+    p.add_argument("--title", type=str, required=True,
+                   help="Human-readable name for the cloned voice.")
+    p.add_argument("--description", type=str, default=None,
+                   help="Optional description shown in your Fish voice library.")
+    p.add_argument("--text", type=str, action="append", default=None,
+                   metavar="TRANSCRIPT",
+                   help="Optional transcript for the corresponding --sample. "
+                        "Repeat in same order as --sample, or omit entirely. "
+                        "Transcripts improve cloning fidelity.")
+    p.add_argument("--visibility", choices=["private", "unlist", "public"],
+                   default="private",
+                   help="Voice visibility on Fish (default: private).")
+    return p
+
+
+def _clone_main(argv: list[str]) -> int:
+    args = _build_clone_parser().parse_args(argv)
+
+    sample_paths: list[Path] = list(args.sample) if args.sample else []
+    if not sample_paths and args.record is None:
+        _log("error: provide at least one --sample FILE or --record SECONDS")
+        return 6
+
+    try:
+        api_key = synthesize.read_api_key()
+    except synthesize.MissingAPIKey as e:
+        _log(f"error: {e}")
+        return 5
+
+    recorded_path: Path | None = None
+    if args.record is not None:
+        try:
+            rec = record.find_recorder()
+        except record.RecordError as e:
+            _log(f"error: {e}")
+            return 7
+        recorded_path = Path(tempfile.mkstemp(prefix="tts-clone-", suffix=".wav")[1])
+        _log(f"recording {args.record:.0f}s via {rec} -> {recorded_path}")
+        try:
+            record.record_wav(recorded_path, args.record, recorder=rec)
+        except (record.RecordError, subprocess.CalledProcessError) as e:
+            _log(f"error: recording failed: {e}")
+            return 7
+        sample_paths.append(recorded_path)
+
+    client = synthesize.make_client(api_key)
+    try:
+        voice_id = clone.clone_voice(
+            client,
+            title=args.title,
+            sample_paths=sample_paths,
+            description=args.description,
+            texts=list(args.text) if args.text else None,
+            visibility=args.visibility,
+        )
+    except clone.CloneError as e:
+        _log(f"error: {e}")
+        return 6
+    except Exception as e:
+        _log(f"error: Fish Audio clone failed: {e}")
+        return 1
+    finally:
+        if recorded_path is not None and recorded_path.exists():
+            recorded_path.unlink()
+
+    _log(f"cloned voice '{args.title}' -> reference_id:")
+    print(voice_id)
+    _log("use with: tts-tool --voice-id " + voice_id)
+    _log("or set: export FISH_AUDIO_VOICE_ID=" + voice_id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "clone":
+        return _clone_main(argv[1:])
+
     args = _build_parser().parse_args(argv)
 
     if args.output is None and sys.stdout.isatty():
