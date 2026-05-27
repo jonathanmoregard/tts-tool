@@ -43,3 +43,18 @@ def test_chunks_dir_creates_path(tmp_path: Path):
     cdir = cache.chunks_dir(target)
     assert cdir.exists()
     assert cdir.name == "chunks"
+
+
+def test_key_for_prime_tail_changes_key():
+    base = cache.key_for("hi", "s1", "v", 1.0)
+    with_tail = cache.key_for("hi", "s1", "v", 1.0, prime_tail=b"TAIL1")
+    other_tail = cache.key_for("hi", "s1", "v", 1.0, prime_tail=b"TAIL2")
+    assert base != with_tail
+    assert with_tail != other_tail
+
+
+def test_key_for_prime_tail_none_matches_unset():
+    assert (
+        cache.key_for("hi", "s1", "v", 1.0)
+        == cache.key_for("hi", "s1", "v", 1.0, prime_tail=None)
+    )

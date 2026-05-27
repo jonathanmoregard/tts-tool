@@ -42,7 +42,16 @@ def _build_parser() -> argparse.ArgumentParser:
                         "produces 30-50 chunks; serial synth dominates wall "
                         "time. Higher concurrency trips Fish's per-key rate "
                         "limit (HTTP 429); 3 is empirically safe. 1 = strict "
-                        "serial.")
+                        "serial. Ignored when --prime-tail is set (chained "
+                        "synth is inherently sequential).")
+    p.add_argument("--prime-tail", type=float, default=None, metavar="SECONDS",
+                   help="Feed the last N seconds of chunk N as a "
+                        "ReferenceAudio to chunk N+1, reducing pitch drift "
+                        "between chunks. Reset at paragraph boundaries "
+                        "(chunks with silence_after > 0) so cross-paragraph "
+                        "priming doesn't fight the natural pause. Typical: "
+                        "2.0-3.0s. Forces sequential synth, breaks "
+                        "concurrency. Requires ffmpeg + ffprobe on PATH.")
     return p
 
 
@@ -292,33 +301,31 @@ def main(argv: list[str] | None = None) -> int:
     n = len(chunks)
     audio_per_chunk: list[bytes | None] = [None] * n
     cache_hits = 0
-    to_synth: list[tuple[int, object, str]] = []  # (slot, chunk, cache_key)
-    for slot, c in enumerate(chunks):
-        key = cache.key_for(c.text, model, voice_id, speed)
-        cached = None if args.no_cache else cache.get(cdir, key)
-        if cached is not None:
-            cache_hits += 1
-            _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
-            audio_per_chunk[slot] = cached
-            continue
-        to_synth.append((slot, c, key))
 
-    if to_synth:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        concurrency = max(1, args.concurrency)
-        _log(f"synthesizing {len(to_synth)} chunks (concurrency={concurrency})")
-
-        def _do_one(slot: int, c, key: str):
-            audio = synthesize.synthesize_chunk(
-                client, c.text, model=model, voice_id=voice_id, speed=speed,
-            )
-            return slot, c, key, audio
-
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = [ex.submit(_do_one, slot, c, key) for slot, c, key in to_synth]
-            for fut in as_completed(futures):
+    if args.prime_tail is not None and args.prime_tail > 0:
+        # Sequential prime-tail mode. Each chunk's tail conditions the
+        # next chunk's synthesis. Resets at silence_after > 0 (paragraph
+        # boundary) so cross-paragraph priming doesn't compete with the
+        # natural pause.
+        from .tail_extract import TailExtractError, tail_seconds
+        _log(f"synthesizing {n} chunks (prime-tail={args.prime_tail:.1f}s, "
+             "sequential)")
+        prev_tail: bytes | None = None
+        for slot, c in enumerate(chunks):
+            key = cache.key_for(c.text, model, voice_id, speed,
+                                prime_tail=prev_tail)
+            cached = None if args.no_cache else cache.get(cdir, key)
+            if cached is not None:
+                cache_hits += 1
+                _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
+                audio_per_chunk[slot] = cached
+            else:
                 try:
-                    slot, c, key, audio = fut.result()
+                    audio = synthesize.synthesize_chunk(
+                        client, c.text,
+                        model=model, voice_id=voice_id, speed=speed,
+                        prime_tail=prev_tail,
+                    )
                 except Exception as e:
                     _log(f"error: Fish Audio synthesis failed: {e}")
                     return 1
@@ -326,6 +333,57 @@ def main(argv: list[str] | None = None) -> int:
                     cache.put(cdir, key, audio)
                 audio_per_chunk[slot] = audio
                 _log(f"chunk {c.index + 1}/{n}: done ({len(c.text)} chars)")
+
+            # Decide tail for the NEXT chunk. Reset at paragraph break.
+            if c.silence_after > 0:
+                prev_tail = None
+            else:
+                try:
+                    prev_tail = tail_seconds(
+                        audio_per_chunk[slot], args.prime_tail
+                    )
+                except TailExtractError as e:
+                    _log(f"warn: tail extract failed ({e}); resetting prime")
+                    prev_tail = None
+    else:
+        to_synth: list[tuple[int, object, str]] = []
+        for slot, c in enumerate(chunks):
+            key = cache.key_for(c.text, model, voice_id, speed)
+            cached = None if args.no_cache else cache.get(cdir, key)
+            if cached is not None:
+                cache_hits += 1
+                _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
+                audio_per_chunk[slot] = cached
+                continue
+            to_synth.append((slot, c, key))
+
+        if to_synth:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            concurrency = max(1, args.concurrency)
+            _log(f"synthesizing {len(to_synth)} chunks "
+                 f"(concurrency={concurrency})")
+
+            def _do_one(slot: int, c, key: str):
+                audio = synthesize.synthesize_chunk(
+                    client, c.text,
+                    model=model, voice_id=voice_id, speed=speed,
+                )
+                return slot, c, key, audio
+
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = [ex.submit(_do_one, slot, c, key)
+                           for slot, c, key in to_synth]
+                for fut in as_completed(futures):
+                    try:
+                        slot, c, key, audio = fut.result()
+                    except Exception as e:
+                        _log(f"error: Fish Audio synthesis failed: {e}")
+                        return 1
+                    if not args.no_cache:
+                        cache.put(cdir, key, audio)
+                    audio_per_chunk[slot] = audio
+                    _log(f"chunk {c.index + 1}/{n}: done "
+                         f"({len(c.text)} chars)")
 
     # All slots must be filled by now (cache hit or successful synth).
     assert all(a is not None for a in audio_per_chunk), "synth slot left empty"

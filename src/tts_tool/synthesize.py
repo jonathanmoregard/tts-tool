@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from fishaudio import FishAudio, RateLimitError, ServerError
+from fishaudio import FishAudio, RateLimitError, ReferenceAudio, ServerError
 
 
 class MissingAPIKey(RuntimeError):
@@ -37,10 +37,21 @@ def synthesize_chunk(
     model: str = "s2-pro",
     voice_id: str | None = None,
     speed: float = 1.0,
+    prime_tail: bytes | None = None,
     max_retries: int = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bytes:
-    """Convert one chunk of text to MP3 bytes. Retries transient errors."""
+    """Convert one chunk of text to MP3 bytes. Retries transient errors.
+
+    `prime_tail`, when set, is sent as a ReferenceAudio alongside the
+    voice's reference_id. Fish refines the speaker embedding for this
+    call to match the tail's timbre + pitch profile, reducing
+    inter-chunk pitch jumps. See --prime-tail in the CLI.
+    """
+    references = (
+        [ReferenceAudio(audio=prime_tail, text="")]
+        if prime_tail else None
+    )
     backoffs = [2.0, 4.0, 8.0][:max_retries]
     last_err: Exception | None = None
     for delay in [0.0, *backoffs]:
@@ -50,6 +61,7 @@ def synthesize_chunk(
             return client.tts.convert(
                 text=text,
                 reference_id=voice_id,
+                references=references,
                 format="mp3",
                 speed=speed,
                 model=model,
