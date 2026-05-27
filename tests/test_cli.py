@@ -120,54 +120,10 @@ def _fake_chunks(specs: list[tuple[str, float]]):
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
-def test_cli_prime_tail_chains_within_paragraph_and_resets_at_break(
+def test_cli_prime_tail_chains_across_paragraphs_by_default(
     monkeypatch, tmp_path: Path,
 ):
-    """--prime-tail: priming chains within a paragraph and resets at silence_after > 0."""
-    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
-    monkeypatch.setenv("LISTEN_CACHE_DIR", str(tmp_path / "cache"))
-
-    fake = _silence_mp3(tmp_path / "fake.mp3", 0.5)
-    fake_client = MagicMock()
-    fake_client.tts.convert.return_value = fake
-    monkeypatch.setattr("tts_tool.synthesize.make_client", lambda *a, **k: fake_client)
-
-    # 4 chunks: A (no break), B (paragraph break after), C (no break), D.
-    chunks = _fake_chunks([
-        ("Alpha.", 0.0),
-        ("Bravo.", 0.6),
-        ("Charlie.", 0.0),
-        ("Delta.", 0.0),
-    ])
-    monkeypatch.setattr("tts_tool.cli.chunkmod.chunk_text", lambda _raw: chunks)
-
-    src = tmp_path / "in.txt"
-    src.write_text("any text; chunker is monkeypatched")
-    out = tmp_path / "out.mp3"
-
-    rc = cli.main(["-i", str(src), "-o", str(out), "--prime-tail", "0.2"])
-    assert rc == 0
-    assert out.exists() and out.stat().st_size > 0
-
-    calls = fake_client.tts.convert.call_args_list
-    assert len(calls) == 4
-    # Chunk 0 (Alpha): first ever, no prior tail.
-    assert calls[0].kwargs["references"] is None
-    # Chunk 1 (Bravo): primed by Alpha's tail.
-    assert calls[1].kwargs["references"] is not None
-    assert len(calls[1].kwargs["references"]) == 1
-    # Chunk 2 (Charlie): first chunk of new paragraph (Bravo had silence_after).
-    # So priming was RESET — references should be None again.
-    assert calls[2].kwargs["references"] is None
-    # Chunk 3 (Delta): primed by Charlie's tail.
-    assert calls[3].kwargs["references"] is not None
-
-
-@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
-def test_cli_prime_cross_paragraph_chains_through_silence(
-    monkeypatch, tmp_path: Path,
-):
-    """--prime-cross-paragraph overrides the paragraph-break reset."""
+    """--prime-tail default: chains through paragraph breaks (silence_after > 0)."""
     monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
     monkeypatch.setenv("LISTEN_CACHE_DIR", str(tmp_path / "cache"))
 
@@ -187,16 +143,52 @@ def test_cli_prime_cross_paragraph_chains_through_silence(
     src.write_text("ignored")
     rc = cli.main([
         "-i", str(src), "-o", str(tmp_path / "out.mp3"),
-        "--prime-tail", "0.2", "--prime-cross-paragraph",
+        "--prime-tail", "0.2",
     ])
     assert rc == 0
     calls = fake_client.tts.convert.call_args_list
     assert len(calls) == 3
     # Chunk 0: first ever, no prior tail.
     assert calls[0].kwargs["references"] is None
-    # Chunks 1, 2: primed despite preceding silence_after > 0.
+    # Chunks 1, 2: primed despite preceding silence_after > 0 — that's the
+    # default behavior now.
     assert calls[1].kwargs["references"] is not None
     assert calls[2].kwargs["references"] is not None
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_cli_prime_reset_paragraph_breaks_chain(monkeypatch, tmp_path: Path):
+    """--prime-reset-paragraph opt-out restores the per-paragraph reset."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setenv("LISTEN_CACHE_DIR", str(tmp_path / "cache"))
+
+    fake = _silence_mp3(tmp_path / "fake.mp3", 0.5)
+    fake_client = MagicMock()
+    fake_client.tts.convert.return_value = fake
+    monkeypatch.setattr("tts_tool.synthesize.make_client", lambda *a, **k: fake_client)
+
+    chunks = _fake_chunks([
+        ("Alpha.", 0.0),
+        ("Bravo.", 0.6),
+        ("Charlie.", 0.0),
+        ("Delta.", 0.0),
+    ])
+    monkeypatch.setattr("tts_tool.cli.chunkmod.chunk_text", lambda _raw: chunks)
+
+    src = tmp_path / "in.txt"
+    src.write_text("ignored")
+    rc = cli.main([
+        "-i", str(src), "-o", str(tmp_path / "out.mp3"),
+        "--prime-tail", "0.2", "--prime-reset-paragraph",
+    ])
+    assert rc == 0
+    calls = fake_client.tts.convert.call_args_list
+    assert len(calls) == 4
+    # 0 first-ever, 1 primed by 0, 2 reset after Bravo's silence_after, 3 primed by 2.
+    assert calls[0].kwargs["references"] is None
+    assert calls[1].kwargs["references"] is not None
+    assert calls[2].kwargs["references"] is None
+    assert calls[3].kwargs["references"] is not None
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")

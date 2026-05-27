@@ -48,20 +48,19 @@ def _build_parser() -> argparse.ArgumentParser:
                         "synth is inherently sequential).")
     p.add_argument("--prime-tail", type=float, default=None, metavar="SECONDS",
                    help="Feed the last N seconds of chunk N as a "
-                        "ReferenceAudio to chunk N+1, reducing pitch drift "
-                        "between chunks. Reset at paragraph boundaries "
-                        "(chunks with silence_after > 0) so cross-paragraph "
-                        "priming doesn't fight the natural pause. Typical: "
-                        "2.0-3.0s. Forces sequential synth, breaks "
-                        "concurrency. Requires ffmpeg + ffprobe on PATH.")
-    p.add_argument("--prime-cross-paragraph", action="store_true",
-                   help="Allow --prime-tail to chain across paragraph "
-                        "boundaries (chunks with silence_after > 0). By "
-                        "default priming resets so it doesn't pull pitch "
-                        "across a deliberate pause; this flag forces "
-                        "continuity across pauses too. Useful when the "
-                        "chunker emits one chunk per paragraph (priming "
-                        "would otherwise never engage).")
+                        "ReferenceAudio to chunk N+1, reducing pitch drift. "
+                        "Priming chains across paragraph boundaries by "
+                        "default (empirically the win for prose-decorate "
+                        "output, where every chunk IS a paragraph). "
+                        "Typical: 2.0-3.0s. Forces sequential synth, "
+                        "breaks concurrency. Requires ffmpeg + ffprobe "
+                        "on PATH.")
+    p.add_argument("--prime-reset-paragraph", action="store_true",
+                   help="Reset --prime-tail at paragraph breaks (chunks "
+                        "with silence_after > 0). Reverts the pre-2026-05-27 "
+                        "behavior. Pick when cross-paragraph priming pulls "
+                        "the pitch across a pause in a way that fights the "
+                        "intended cadence.")
     return p
 
 
@@ -344,9 +343,10 @@ def main(argv: list[str] | None = None) -> int:
                 audio_per_chunk[slot] = audio
                 _log(f"chunk {c.index + 1}/{n}: done ({len(c.text)} chars)")
 
-            # Decide tail for the NEXT chunk. Reset at paragraph break unless
-            # --prime-cross-paragraph forces chaining through pauses.
-            if c.silence_after > 0 and not args.prime_cross_paragraph:
+            # Decide tail for the NEXT chunk. Chain through paragraph breaks
+            # by default; reset only when --prime-reset-paragraph opt-out
+            # was requested.
+            if c.silence_after > 0 and args.prime_reset_paragraph:
                 prev_tail = None
             else:
                 try:

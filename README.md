@@ -79,20 +79,14 @@ substack-url-tool "$URL" | prose-decorate \
   | tts-tool --prime-tail 2.5 -o article.mp3
 ```
 
-Priming resets at paragraph boundaries (chunks with `silence_after >
-0`) so the natural pause isn't fighting a cross-paragraph pitch lock.
+Priming chains across paragraph boundaries by default — empirically
+the win for prose-decorate output, where every chunk IS a paragraph
+and per-paragraph reset means priming never engages. Pass
+`--prime-reset-paragraph` to revert (priming resets at chunks with
+`silence_after > 0`).
+
 Forces sequential synth (`-j` ignored), ~3x slower than the default
 parallel path. Needs `ffmpeg` + `ffprobe` on PATH for tail slicing.
-
-When the chunker emits one chunk per paragraph (`prose-decorate`
-output typically does), the paragraph-break reset means priming
-never engages. Pass `--prime-cross-paragraph` to chain through the
-pauses anyway — empirically the dominant win for substack-style
-prose:
-
-```sh
-tts-tool --prime-tail 2.5 --prime-cross-paragraph -o out.mp3
-```
 
 ## How it works
 
