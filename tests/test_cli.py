@@ -113,6 +113,87 @@ def test_cli_no_cache_flag_skips_cache(monkeypatch, tmp_path: Path):
     assert fake_client.tts.convert.call_count == 2
 
 
+def _fake_chunks(specs: list[tuple[str, float]]):
+    """Build a list of Chunk-like objects for tests. Each spec is (text, silence_after)."""
+    from tts_tool.chunk import Chunk
+    return [Chunk(text=t, silence_after=s, index=i) for i, (t, s) in enumerate(specs)]
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_cli_prime_tail_chains_within_paragraph_and_resets_at_break(
+    monkeypatch, tmp_path: Path,
+):
+    """--prime-tail: priming chains within a paragraph and resets at silence_after > 0."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setenv("LISTEN_CACHE_DIR", str(tmp_path / "cache"))
+
+    fake = _silence_mp3(tmp_path / "fake.mp3", 0.5)
+    fake_client = MagicMock()
+    fake_client.tts.convert.return_value = fake
+    monkeypatch.setattr("tts_tool.synthesize.make_client", lambda *a, **k: fake_client)
+
+    # 4 chunks: A (no break), B (paragraph break after), C (no break), D.
+    chunks = _fake_chunks([
+        ("Alpha.", 0.0),
+        ("Bravo.", 0.6),
+        ("Charlie.", 0.0),
+        ("Delta.", 0.0),
+    ])
+    monkeypatch.setattr("tts_tool.cli.chunkmod.chunk_text", lambda _raw: chunks)
+
+    src = tmp_path / "in.txt"
+    src.write_text("any text; chunker is monkeypatched")
+    out = tmp_path / "out.mp3"
+
+    rc = cli.main(["-i", str(src), "-o", str(out), "--prime-tail", "0.2"])
+    assert rc == 0
+    assert out.exists() and out.stat().st_size > 0
+
+    calls = fake_client.tts.convert.call_args_list
+    assert len(calls) == 4
+    # Chunk 0 (Alpha): first ever, no prior tail.
+    assert calls[0].kwargs["references"] is None
+    # Chunk 1 (Bravo): primed by Alpha's tail.
+    assert calls[1].kwargs["references"] is not None
+    assert len(calls[1].kwargs["references"]) == 1
+    # Chunk 2 (Charlie): first chunk of new paragraph (Bravo had silence_after).
+    # So priming was RESET — references should be None again.
+    assert calls[2].kwargs["references"] is None
+    # Chunk 3 (Delta): primed by Charlie's tail.
+    assert calls[3].kwargs["references"] is not None
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="requires ffmpeg")
+def test_cli_prime_tail_serializes(monkeypatch, tmp_path: Path):
+    """--prime-tail forces sequential synth even with -j set."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setenv("LISTEN_CACHE_DIR", str(tmp_path / "cache"))
+
+    fake = _silence_mp3(tmp_path / "fake.mp3", 0.5)
+    call_order: list[int] = []
+
+    def fake_convert(**kwargs):
+        call_order.append(len(call_order))
+        return fake
+
+    fake_client = MagicMock()
+    fake_client.tts.convert.side_effect = fake_convert
+    monkeypatch.setattr("tts_tool.synthesize.make_client", lambda *a, **k: fake_client)
+
+    chunks = _fake_chunks([("One.", 0.0), ("Two.", 0.0), ("Three.", 0.0)])
+    monkeypatch.setattr("tts_tool.cli.chunkmod.chunk_text", lambda _raw: chunks)
+
+    src = tmp_path / "in.txt"
+    src.write_text("any")
+    rc = cli.main([
+        "-i", str(src), "-o", str(tmp_path / "out.mp3"),
+        "--prime-tail", "0.2", "-j", "5",
+    ])
+    assert rc == 0
+    # Serial execution → call_order is 0,1,2 in deterministic order
+    assert call_order == [0, 1, 2]
+
+
 class _StdinBytes:
     """Minimal stdin stand-in: .buffer.read() returns the bytes."""
     def __init__(self, data: bytes) -> None:

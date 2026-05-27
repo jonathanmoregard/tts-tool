@@ -36,8 +36,36 @@ def test_synthesize_chunk_success_passes_kwargs():
     )
     assert out == b"audio-bytes"
     client.tts.convert.assert_called_once_with(
-        text="hello", reference_id="vid", format="mp3", speed=1.1, model="s1"
+        text="hello", reference_id="vid", references=None,
+        format="mp3", speed=1.1, model="s1",
     )
+
+
+def test_synthesize_chunk_with_prime_tail_passes_reference_audio():
+    """prime_tail bytes wrap into a ReferenceAudio in references=."""
+    from fishaudio import ReferenceAudio
+
+    client = MagicMock()
+    client.tts.convert.return_value = b"audio"
+    out = synthesize_chunk(
+        client, "hi", voice_id="v", prime_tail=b"TAILBYTES",
+        sleep=lambda _: None,
+    )
+    assert out == b"audio"
+    call = client.tts.convert.call_args.kwargs
+    assert call["text"] == "hi"
+    assert call["reference_id"] == "v"
+    assert len(call["references"]) == 1
+    ref = call["references"][0]
+    assert isinstance(ref, ReferenceAudio)
+    assert ref.audio == b"TAILBYTES"
+
+
+def test_synthesize_chunk_prime_tail_none_is_no_references():
+    client = MagicMock()
+    client.tts.convert.return_value = b"audio"
+    synthesize_chunk(client, "hi", prime_tail=None, sleep=lambda _: None)
+    assert client.tts.convert.call_args.kwargs["references"] is None
 
 
 def test_synthesize_chunk_retries_on_server_error():

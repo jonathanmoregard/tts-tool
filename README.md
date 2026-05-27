@@ -66,6 +66,24 @@ API key from `config.age.secrets.fish-audio-api-key.path` via a wrapper.
 | `LISTEN_SPEED` | `1.0` | Prosody speed, 0.8 - 1.2 |
 | `LISTEN_CACHE_DIR` | platformdirs cache | Chunk MP3 cache location |
 
+## --prime-tail (pitch continuity)
+
+Long-form synth of cloned voices drifts in pitch between chunks
+(diffusion stochasticity + independent per-chunk inference). Pass
+`--prime-tail SECONDS` to feed the last N seconds of chunk N as a
+`ReferenceAudio` to chunk N+1. Fish refines the speaker embedding
+per call to match the tail's timbre, reducing inter-chunk pitch jumps.
+
+```sh
+substack-url-tool "$URL" | prose-decorate \
+  | tts-tool --prime-tail 2.5 -o article.mp3
+```
+
+Priming resets at paragraph boundaries (chunks with `silence_after >
+0`) so the natural pause isn't fighting a cross-paragraph pitch lock.
+Forces sequential synth (`-j` ignored), ~3x slower than the default
+parallel path. Needs `ffmpeg` + `ffprobe` on PATH for tail slicing.
+
 ## How it works
 
 ```
