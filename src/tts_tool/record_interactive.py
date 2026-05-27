@@ -27,11 +27,28 @@ from .record import RecordError
 
 @dataclass(frozen=True)
 class Segment:
-    """One scripted register slot in the recording flow."""
+    """One scripted register slot in the recording flow.
+
+    `transcript` is a template that may contain the literal `{name}`
+    placeholder; render via `render_transcript`. Other text is read
+    verbatim — the speaker doesn't need to identify with the prose;
+    Fish only uses the transcript to improve fidelity, not as belief.
+    """
     label: str            # short tag shown in prompts, e.g. "warmup"
     instructions: str     # how to read it (volume, pace, register)
-    transcript: str       # the text to read aloud
+    transcript: str       # template; may contain "{name}"
     max_seconds: float    # cap on recording length
+
+
+def render_transcript(template: str, name: str = "") -> str:
+    """Substitute {name} or strip the name clause if name is empty."""
+    if name:
+        return template.replace("{name}", name)
+    # No name supplied: drop the introduction clause cleanly.
+    cleaned = template.replace("My name is {name}, and ", "")
+    cleaned = cleaned.replace(", {name},", "")
+    cleaned = cleaned.replace("{name}", "the speaker")
+    return cleaned
 
 
 # Default 6-segment script. Per research:
@@ -46,7 +63,7 @@ DEFAULT_SCRIPT: tuple[Segment, ...] = (
         label="warmup",
         instructions="Neutral, conversational. Establishes baseline timbre.",
         transcript=(
-            "Hello. My name is Jonathan, and I'm recording a short sample "
+            "Hello. My name is {name}, and I'm recording a short sample "
             "so a model can learn the sound of my voice. The rainbow is "
             "a division of white light into many beautiful colors. These "
             "take the shape of a long round arch, with its path high "
@@ -89,8 +106,8 @@ DEFAULT_SCRIPT: tuple[Segment, ...] = (
         label="stability",
         instructions="Neutral register. Clear articulation. Numbers + lists.",
         transcript=(
-            "A few anchors for the model. In two thousand twenty-six we "
-            "live in Sweden. The weather today is around fifteen degrees. "
+            "A few anchors for the model. The year is two thousand "
+            "twenty-six. The weather today is around fifteen degrees. "
             "Three apples, seven minutes, eleven o'clock, twenty-four "
             "hours. Bread, coffee, a long evening, a quiet morning."
         ),
@@ -184,13 +201,20 @@ def play_back(path: Path) -> None:
 
 
 def prompt_verdict(prompt_input=None) -> str:
-    """Ask user to accept (y), redo (r), skip (s), or quit (q). Returns letter."""
+    """Ask user to (p)lay / (y) accept / (r) redo / (s) skip / (q) quit.
+
+    Default is (r)edo — empty input re-records, since the speaker typically
+    knows mid-recording whether they slipped up and shouldn't have to
+    type anything to retry. (p) plays the take back through mpv.
+    """
     if prompt_input is None:
         prompt_input = input
     while True:
-        raw = prompt_input("accept (y) / redo (r) / skip (s) / quit (q)? [y]: ")
-        choice = (raw or "y").strip().lower()[:1]
-        if choice in {"y", "r", "s", "q"}:
+        raw = prompt_input(
+            "play (p) / accept (y) / redo (r) / skip (s) / quit (q)? [r]: "
+        )
+        choice = (raw or "r").strip().lower()[:1]
+        if choice in {"p", "y", "r", "s", "q"}:
             return choice
         print("invalid choice, try again", file=sys.stderr)
 
@@ -200,6 +224,7 @@ def run_interactive_capture(
     work_dir: Path,
     *,
     recorder: str | None = None,
+    speaker_name: str = "",
     prompt_input=None,
     record_fn=None,
     play_fn=None,
@@ -220,30 +245,39 @@ def run_interactive_capture(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, seg in enumerate(segments, start=1):
+        text = render_transcript(seg.transcript, speaker_name)
         print(f"\n=== [{idx}/{len(segments)}] {seg.label} ===", file=sys.stderr)
         print(f"register: {seg.instructions}", file=sys.stderr)
-        print(f"text:\n  {seg.transcript}", file=sys.stderr)
+        print(f"text:\n  {text}", file=sys.stderr)
 
-        while True:
+        while True:  # per take loop
             prompt_input(
                 f"press ENTER to start recording (max {seg.max_seconds:.0f}s, "
                 "ENTER again to stop): "
             )
             wav = work_dir / f"{idx:02d}-{seg.label}.wav"
             record_fn(wav, seg.max_seconds, recorder=recorder)
-            print("playback:", file=sys.stderr)
-            play_fn(wav)
 
-            v = prompt_verdict(prompt_input=prompt_input)
-            if v == "y":
-                accepted.append((wav, seg.transcript))
-                break
-            if v == "r":
-                continue
-            if v == "s":
-                print(f"skipped {seg.label}", file=sys.stderr)
-                break
-            if v == "q":
-                raise KeyboardInterrupt("user quit recording flow")
+            # Verdict loop: 'p' replays without re-recording, all other
+            # choices break out (either to next segment or back to re-record).
+            advance = False
+            while not advance:
+                v = prompt_verdict(prompt_input=prompt_input)
+                if v == "p":
+                    play_fn(wav)
+                    continue
+                if v == "y":
+                    accepted.append((wav, text))
+                    advance = True
+                elif v == "r":
+                    advance = False
+                    break  # leave verdict loop, re-enter take loop
+                elif v == "s":
+                    print(f"skipped {seg.label}", file=sys.stderr)
+                    advance = True
+                elif v == "q":
+                    raise KeyboardInterrupt("user quit recording flow")
+            if advance:
+                break  # leave take loop, advance to next segment
 
     return accepted
