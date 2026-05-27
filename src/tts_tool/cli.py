@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from . import chunk as chunkmod
-from . import cache, clone, record, synthesize
+from . import cache, clone, record, record_interactive, synthesize
 from .stitch import StitchError, stitch_mp3s
 
 # Fish Audio voice library reference_id. Cloned from a 90s sample of
@@ -155,11 +155,103 @@ def _clone_main(argv: list[str]) -> int:
     return 0
 
 
+def _build_record_clone_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="tts-tool record-clone",
+        description="Interactive multi-segment voice cloning. Walks you through "
+                    "a register-varied script (warmup / tender / playful / "
+                    "reflective / stability / intimate), recording each segment "
+                    "with stop-on-ENTER and per-segment accept/redo prompts. "
+                    "Bundles the accepted takes into one Fish Audio voice model.",
+    )
+    p.add_argument("--title", type=str, required=True,
+                   help="Human-readable name for the cloned voice.")
+    p.add_argument("--description", type=str, default=None,
+                   help="Optional description in your Fish voice library.")
+    p.add_argument("--visibility", choices=["private", "unlist", "public"],
+                   default="private",
+                   help="Voice visibility on Fish (default: private).")
+    p.add_argument("--keep-takes", action="store_true",
+                   help="Keep the per-segment WAVs on disk after upload "
+                        "(under --work-dir). Default: delete on success.")
+    p.add_argument("--work-dir", type=Path, default=None,
+                   help="Where to write per-segment WAVs (default: a temp dir).")
+    return p
+
+
+def _clone_interactive_main(argv: list[str]) -> int:
+    args = _build_record_clone_parser().parse_args(argv)
+
+    try:
+        api_key = synthesize.read_api_key()
+    except synthesize.MissingAPIKey as e:
+        _log(f"error: {e}")
+        return 5
+
+    try:
+        recorder = record.find_recorder()
+    except record.RecordError as e:
+        _log(f"error: {e}")
+        return 7
+
+    work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="tts-record-clone-"))
+
+    try:
+        accepted = record_interactive.run_interactive_capture(
+            record_interactive.DEFAULT_SCRIPT,
+            work_dir,
+            recorder=recorder,
+        )
+    except KeyboardInterrupt:
+        _log("aborted by user")
+        return 130
+
+    if not accepted:
+        _log("error: no segments accepted, nothing to upload")
+        return 6
+
+    _log(f"uploading {len(accepted)} accepted segments to Fish Audio...")
+    sample_paths = [w for w, _ in accepted]
+    texts = [t for _, t in accepted]
+
+    client = synthesize.make_client(api_key)
+    try:
+        voice_id = clone.clone_voice(
+            client,
+            title=args.title,
+            sample_paths=sample_paths,
+            description=args.description,
+            texts=texts,
+            visibility=args.visibility,
+        )
+    except clone.CloneError as e:
+        _log(f"error: {e}")
+        return 6
+    except Exception as e:
+        _log(f"error: Fish Audio clone failed: {e}")
+        return 1
+    finally:
+        if not args.keep_takes and args.work_dir is None:
+            for w in sample_paths:
+                try:
+                    w.unlink()
+                except OSError:
+                    pass
+
+    _log(f"cloned voice '{args.title}' from {len(accepted)} segments -> reference_id:")
+    print(voice_id)
+    _log("use with: tts-tool --voice-id " + voice_id)
+    _log("or set: export FISH_AUDIO_VOICE_ID=" + voice_id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "clone":
         return _clone_main(argv[1:])
+    if argv and argv[0] == "record-clone":
+        return _clone_interactive_main(argv[1:])
 
     args = _build_parser().parse_args(argv)
 
