@@ -84,6 +84,16 @@ Priming resets at paragraph boundaries (chunks with `silence_after >
 Forces sequential synth (`-j` ignored), ~3x slower than the default
 parallel path. Needs `ffmpeg` + `ffprobe` on PATH for tail slicing.
 
+When the chunker emits one chunk per paragraph (`prose-decorate`
+output typically does), the paragraph-break reset means priming
+never engages. Pass `--prime-cross-paragraph` to chain through the
+pauses anyway — empirically the dominant win for substack-style
+prose:
+
+```sh
+tts-tool --prime-tail 2.5 --prime-cross-paragraph -o out.mp3
+```
+
 ## How it works
 
 ```

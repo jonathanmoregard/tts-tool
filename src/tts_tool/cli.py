@@ -12,10 +12,12 @@ from . import chunk as chunkmod
 from . import cache, clone, record, record_interactive, synthesize
 from .stitch import StitchError, stitch_mp3s
 
-# Fish Audio voice library reference_id. Cloned from a 90s sample of
-# Jonathan Moregard reading English prose on 2026-05-26 via the clone
-# subcommand below. Switch with --voice-id or FISH_AUDIO_VOICE_ID env.
-DEFAULT_VOICE_ID = "282fa853838548af9803ed5b78226253"
+# Fish Audio voice library reference_id. Cloned from a 6-segment
+# register-varied interactive bundle (warmup / tender / playful /
+# reflective / stability / intimate) of Jonathan Moregard on
+# 2026-05-27 via `tts-tool record-clone`. Switch with --voice-id or
+# FISH_AUDIO_VOICE_ID env.
+DEFAULT_VOICE_ID = "91ab0b2241fa4514a35535e40108a59a"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -52,6 +54,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         "priming doesn't fight the natural pause. Typical: "
                         "2.0-3.0s. Forces sequential synth, breaks "
                         "concurrency. Requires ffmpeg + ffprobe on PATH.")
+    p.add_argument("--prime-cross-paragraph", action="store_true",
+                   help="Allow --prime-tail to chain across paragraph "
+                        "boundaries (chunks with silence_after > 0). By "
+                        "default priming resets so it doesn't pull pitch "
+                        "across a deliberate pause; this flag forces "
+                        "continuity across pauses too. Useful when the "
+                        "chunker emits one chunk per paragraph (priming "
+                        "would otherwise never engage).")
     return p
 
 
@@ -334,8 +344,9 @@ def main(argv: list[str] | None = None) -> int:
                 audio_per_chunk[slot] = audio
                 _log(f"chunk {c.index + 1}/{n}: done ({len(c.text)} chars)")
 
-            # Decide tail for the NEXT chunk. Reset at paragraph break.
-            if c.silence_after > 0:
+            # Decide tail for the NEXT chunk. Reset at paragraph break unless
+            # --prime-cross-paragraph forces chaining through pauses.
+            if c.silence_after > 0 and not args.prime_cross_paragraph:
                 prev_tail = None
             else:
                 try:
