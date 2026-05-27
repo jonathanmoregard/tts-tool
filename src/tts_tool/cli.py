@@ -166,6 +166,11 @@ def _build_record_clone_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--title", type=str, required=True,
                    help="Human-readable name for the cloned voice.")
+    p.add_argument("--speaker-name", type=str, default="",
+                   help="First name of the speaker. Substituted into the "
+                        "warmup segment's '{name}' placeholder. Omit for "
+                        "anonymous cloning (the name introduction is "
+                        "dropped from the script).")
     p.add_argument("--description", type=str, default=None,
                    help="Optional description in your Fish voice library.")
     p.add_argument("--visibility", choices=["private", "unlist", "public"],
@@ -201,6 +206,7 @@ def _clone_interactive_main(argv: list[str]) -> int:
             record_interactive.DEFAULT_SCRIPT,
             work_dir,
             recorder=recorder,
+            speaker_name=args.speaker_name,
         )
     except KeyboardInterrupt:
         _log("aborted by user")

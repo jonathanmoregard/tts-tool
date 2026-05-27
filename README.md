@@ -19,14 +19,19 @@ tts-tool clone --sample me.wav --title "My voice"
 tts-tool clone --record 60 --title "My voice"
 
 # C. Interactive multi-segment (recommended for expressive clones):
-tts-tool record-clone --title "My voice"
+tts-tool record-clone --title "My voice" --speaker-name "Jonathan"
+
+# Anonymous (no name in the script):
+tts-tool record-clone --title "Some-voice"
 ```
 
 `record-clone` walks you through six register-varied segments (warmup,
 tender, playful, reflective, stability, intimate). Stop-on-ENTER per
-segment, playback, accept / redo / skip / quit prompt. Bundles all
-accepted takes into one upload with transcripts — gives the embedding
-phonetic + prosodic breadth without forcing a single 4-minute take.
+segment, then (p)lay / (y)es / (r)edo / (s)kip / (q)uit. Bundles
+all accepted takes into one upload with transcripts — gives the
+embedding phonetic + prosodic breadth without forcing a single
+4-minute take. Script is person-neutral; `--speaker-name` fills in
+the warmup introduction, or omit it for anonymous cloning.
 
 All three print the new Fish Audio `reference_id`. Plug into synth via
 `--voice-id ID` or `export FISH_AUDIO_VOICE_ID=ID`.
