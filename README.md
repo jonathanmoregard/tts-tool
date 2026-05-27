@@ -9,18 +9,26 @@ substack-url-tool "$URL" | tts-tool -o article.mp3
 
 ## Voice cloning
 
+Three flows, all wrapping Fish Audio's `voices.create`:
+
 ```sh
-# From an existing recording:
+# A. From an existing recording:
 tts-tool clone --sample me.wav --title "My voice"
 
-# Captured inline (60s via pw-record / arecord / ffmpeg):
+# B. Inline capture (single clip, pw-record / arecord / ffmpeg):
 tts-tool clone --record 60 --title "My voice"
 
-# Both (combined into one upload):
-tts-tool clone --sample me.wav --record 30 --title "My voice"
+# C. Interactive multi-segment (recommended for expressive clones):
+tts-tool record-clone --title "My voice"
 ```
 
-Prints the new Fish Audio `reference_id`. Plug into synth via
+`record-clone` walks you through six register-varied segments (warmup,
+tender, playful, reflective, stability, intimate). Stop-on-ENTER per
+segment, playback, accept / redo / skip / quit prompt. Bundles all
+accepted takes into one upload with transcripts — gives the embedding
+phonetic + prosodic breadth without forcing a single 4-minute take.
+
+All three print the new Fish Audio `reference_id`. Plug into synth via
 `--voice-id ID` or `export FISH_AUDIO_VOICE_ID=ID`.
 
 ## Install (dev)
