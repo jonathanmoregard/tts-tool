@@ -64,7 +64,7 @@ def enhance_with_auphonic(
         )
     if not os.environ.get("AUPHONIC_API_KEY", "").strip():
         raise EnhanceError(
-            "AUPHONIC_API_KEY not set (or empty); auphonic --help for auth)"
+            "AUPHONIC_API_KEY not set or empty; see `auphonic --help` for auth"
         )
     if not in_path.is_file():
         raise EnhanceError(f"input not found: {in_path}")

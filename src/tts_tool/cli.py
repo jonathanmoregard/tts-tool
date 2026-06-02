@@ -143,7 +143,9 @@ def _clone_main(argv: list[str]) -> int:
         except record.RecordError as e:
             _log(f"error: {e}")
             return 7
-        recorded_path = Path(tempfile.mkstemp(prefix="tts-clone-", suffix=".wav")[1])
+        _fd, _rec_str = tempfile.mkstemp(prefix="tts-clone-", suffix=".wav")
+        os.close(_fd)
+        recorded_path = Path(_rec_str)
         _log(f"recording {args.record:.0f}s via {rec} -> {recorded_path}")
         try:
             record.record_wav(recorded_path, args.record, recorder=rec)
@@ -163,9 +165,11 @@ def _clone_main(argv: list[str]) -> int:
         else:
             cleaned_paths: list[Path] = []
             for sp in sample_paths:
-                cleaned = Path(tempfile.mkstemp(
+                _cfd, _cstr = tempfile.mkstemp(
                     prefix="tts-enhanced-", suffix=sp.suffix or ".wav",
-                )[1])
+                )
+                os.close(_cfd)
+                cleaned = Path(_cstr)
                 try:
                     _log(f"enhancing {sp.name} via auphonic...")
                     enhance.enhance_with_auphonic(sp, cleaned)
@@ -263,7 +267,12 @@ def _clone_interactive_main(argv: list[str]) -> int:
     enhance_fn = None
     if args.enhance:
         if enhance.auphonic_available():
-            enhance_fn = enhance.enhance_with_auphonic
+            # record_interactive calls enhance_fn(wav) with one positional arg
+            # and expects the path to be cleaned in place. enhance_with_auphonic
+            # takes (in_path, out_path) so we bind them to the same Path here;
+            # the implementation reads in, downloads to a tempdir, and writes
+            # out as the last step, so in == out is safe.
+            enhance_fn = lambda p: enhance.enhance_with_auphonic(p, p)
         else:
             _log("warn: --enhance requested but auphonic CLI / "
                  "AUPHONIC_API_KEY not available; takes will not be cleaned")

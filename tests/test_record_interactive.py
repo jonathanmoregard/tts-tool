@@ -292,6 +292,55 @@ def test_run_interactive_capture_passes_speaker_name(tmp_path: Path):
     assert accepted[0][1] == "Hi, I'm Sara."
 
 
+def test_cli_record_clone_enhance_default_calls_enhance_in_place(
+    monkeypatch, capsys, tmp_path: Path,
+):
+    """Regression: when --enhance is on (default), each take is cleaned
+    via enhance_with_auphonic(wav, wav). Previously the wiring assigned
+    `enhance_fn = enhance.enhance_with_auphonic` directly, which raises
+    TypeError on the one-arg call from run_interactive_capture and
+    silently disables enhancement."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setattr("tts_tool.record.find_recorder", lambda: "pw-record-stub")
+    monkeypatch.setattr(
+        "tts_tool.record_interactive.record_until_enter",
+        lambda out_path, _ms, recorder=None: out_path.write_bytes(b"RAW"),
+    )
+    monkeypatch.setattr("tts_tool.record_interactive.play_back", lambda _p: None)
+    monkeypatch.setattr("tts_tool.enhance.auphonic_available", lambda: True)
+
+    enhance_calls: list[tuple[Path, Path]] = []
+
+    def fake_enhance(in_path: Path, out_path: Path, **_kw) -> None:
+        enhance_calls.append((in_path, out_path))
+        out_path.write_bytes(b"CLEANED")
+
+    monkeypatch.setattr("tts_tool.enhance.enhance_with_auphonic", fake_enhance)
+
+    fake_client = MagicMock()
+    fake_client.voices.create.return_value = SimpleNamespace(id="enh-id")
+    monkeypatch.setattr(
+        "tts_tool.synthesize.make_client", lambda *a, **k: fake_client
+    )
+
+    inputs = iter([""] + ["y"] + ([""] + ["y"]) * 5)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+    rc = cli.main([
+        "record-clone",
+        "--title", "Jonathan-enh",
+        "--work-dir", str(tmp_path / "takes"),
+    ])
+    assert rc == 0, capsys.readouterr().err
+    # Each segment's enhance call passes the SAME path as in and out (in-place).
+    assert len(enhance_calls) == 6
+    for in_p, out_p in enhance_calls:
+        assert in_p == out_p, "enhance must be called in-place (in == out)"
+    # And the bytes the Fish client sees are the cleaned ones.
+    voices = fake_client.voices.create.call_args.kwargs["voices"]
+    assert all(v == b"CLEANED" for v in voices)
+
+
 def test_cli_record_clone_speaker_name_flag_threaded(monkeypatch, capsys, tmp_path: Path):
     """--speaker-name from CLI is rendered into the warmup segment transcript."""
     monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
