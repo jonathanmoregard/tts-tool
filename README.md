@@ -33,6 +33,14 @@ embedding phonetic + prosodic breadth without forcing a single
 4-minute take. Script is person-neutral; `--speaker-name` fills in
 the warmup introduction, or omit it for anonymous cloning.
 
+`--enhance` (default on) runs each take through Auphonic's
+breath/mouth-noise removal before playback, so the verdict and the
+upload both reflect the cleaned audio. Requires `auphonic` on PATH
+and `AUPHONIC_API_KEY` in env; the tool warns and falls back to raw
+if either is missing, and any per-take enhance failure also falls
+back to the raw recording so the flow never blocks. Pass
+`--no-enhance` to keep raw bytes throughout.
+
 All three print the new Fish Audio `reference_id`. Plug into synth via
 `--voice-id ID` or `export FISH_AUDIO_VOICE_ID=ID`.
 

@@ -21,7 +21,11 @@ class StitchError(RuntimeError):
 
 
 _SILENCE_BITRATE = "128k"
-_SILENCE_SAMPLE_RATE = "22050"
+# Must match Fish s2-pro's actual MP3 output rate. Empirical probe
+# 2026-05-27: Fish emits 44100/mono/128k; stitching 22050 silence with
+# `-c copy` produced audible clicks at every chunk boundary (frame-
+# stream context reset). Match the rate to keep the concat clean.
+_SILENCE_SAMPLE_RATE = "44100"
 
 
 def _generate_silence(tmpdir: Path, seconds: float) -> Path:

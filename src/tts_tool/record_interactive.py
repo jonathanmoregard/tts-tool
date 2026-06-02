@@ -228,8 +228,15 @@ def run_interactive_capture(
     prompt_input=None,
     record_fn=None,
     play_fn=None,
+    enhance_fn=None,
 ) -> list[tuple[Path, str]]:
     """Walk segments, recording each with user accept/redo prompt.
+
+    If `enhance_fn` is given, it is called on every fresh recording after
+    record_fn returns and before play_fn is offered. enhance_fn(path) is
+    expected to overwrite `path` with a cleaned-up version (e.g. via
+    Auphonic). A failed enhance falls back to playing the raw recording
+    with a warning — the user still gets to accept/redo something.
 
     Returns a list of (wav_path, transcript) for every accepted segment,
     in script order, skipping any the user dropped with (s). Exits early
@@ -257,6 +264,16 @@ def run_interactive_capture(
             )
             wav = work_dir / f"{idx:02d}-{seg.label}.wav"
             record_fn(wav, seg.max_seconds, recorder=recorder)
+
+            if enhance_fn is not None:
+                try:
+                    enhance_fn(wav)
+                    print(f"enhanced: {wav.name}", file=sys.stderr)
+                except Exception as e:
+                    print(
+                        f"warning: enhance failed ({e}); playing raw take",
+                        file=sys.stderr,
+                    )
 
             # Verdict loop: 'p' replays without re-recording, all other
             # choices break out (either to next segment or back to re-record).

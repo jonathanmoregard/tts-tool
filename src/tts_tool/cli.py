@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from . import chunk as chunkmod
-from . import cache, clone, record, record_interactive, synthesize
+from . import cache, clone, enhance, record, record_interactive, synthesize
 from .stitch import StitchError, stitch_mp3s
 
 # Fish Audio voice library reference_id. Cloned from a 6-segment
@@ -113,6 +113,12 @@ def _build_clone_parser() -> argparse.ArgumentParser:
     p.add_argument("--visibility", choices=["private", "unlist", "public"],
                    default="private",
                    help="Voice visibility on Fish (default: private).")
+    p.add_argument("--enhance", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Run each sample through Auphonic's breath/mouth-noise "
+                        "removal before uploading to Fish (default: on). "
+                        "Requires `auphonic` on PATH and AUPHONIC_API_KEY in env. "
+                        "Pass --no-enhance to upload raw bytes unchanged.")
     return p
 
 
@@ -146,6 +152,32 @@ def _clone_main(argv: list[str]) -> int:
             return 7
         sample_paths.append(recorded_path)
 
+    # Optional Auphonic enhance pass. Each sample (existing OR freshly
+    # recorded) gets cleaned in-place; failures fall back to the raw
+    # bytes so cloning still proceeds.
+    enhanced_temps: list[Path] = []
+    if args.enhance:
+        if not enhance.auphonic_available():
+            _log("warn: --enhance requested but auphonic CLI / "
+                 "AUPHONIC_API_KEY not available; uploading raw samples")
+        else:
+            cleaned_paths: list[Path] = []
+            for sp in sample_paths:
+                cleaned = Path(tempfile.mkstemp(
+                    prefix="tts-enhanced-", suffix=sp.suffix or ".wav",
+                )[1])
+                try:
+                    _log(f"enhancing {sp.name} via auphonic...")
+                    enhance.enhance_with_auphonic(sp, cleaned)
+                    enhanced_temps.append(cleaned)
+                    cleaned_paths.append(cleaned)
+                except enhance.EnhanceError as e:
+                    _log(f"warn: enhance failed for {sp.name} ({e}); "
+                         "uploading raw")
+                    cleaned.unlink(missing_ok=True)
+                    cleaned_paths.append(sp)
+            sample_paths = cleaned_paths
+
     client = synthesize.make_client(api_key)
     try:
         voice_id = clone.clone_voice(
@@ -165,6 +197,8 @@ def _clone_main(argv: list[str]) -> int:
     finally:
         if recorded_path is not None and recorded_path.exists():
             recorded_path.unlink()
+        for t in enhanced_temps:
+            t.unlink(missing_ok=True)
 
     _log(f"cloned voice '{args.title}' -> reference_id:")
     print(voice_id)
@@ -199,6 +233,13 @@ def _build_record_clone_parser() -> argparse.ArgumentParser:
                         "(under --work-dir). Default: delete on success.")
     p.add_argument("--work-dir", type=Path, default=None,
                    help="Where to write per-segment WAVs (default: a temp dir).")
+    p.add_argument("--enhance", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Run each take through Auphonic's breath/mouth-noise "
+                        "removal between recording and playback (default: on). "
+                        "The 'p' verdict plays the cleaned take, accept stores "
+                        "the cleaned take. Requires `auphonic` on PATH and "
+                        "AUPHONIC_API_KEY in env. Pass --no-enhance to keep raw.")
     return p
 
 
@@ -219,12 +260,21 @@ def _clone_interactive_main(argv: list[str]) -> int:
 
     work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="tts-record-clone-"))
 
+    enhance_fn = None
+    if args.enhance:
+        if enhance.auphonic_available():
+            enhance_fn = enhance.enhance_with_auphonic
+        else:
+            _log("warn: --enhance requested but auphonic CLI / "
+                 "AUPHONIC_API_KEY not available; takes will not be cleaned")
+
     try:
         accepted = record_interactive.run_interactive_capture(
             record_interactive.DEFAULT_SCRIPT,
             work_dir,
             recorder=recorder,
             speaker_name=args.speaker_name,
+            enhance_fn=enhance_fn,
         )
     except KeyboardInterrupt:
         _log("aborted by user")

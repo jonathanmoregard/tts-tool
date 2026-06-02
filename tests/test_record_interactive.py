@@ -106,6 +106,59 @@ def test_run_interactive_capture_play_then_accept(tmp_path: Path):
     assert play_calls[0] == accepted[0][0]
 
 
+def test_run_interactive_capture_calls_enhance_after_record(tmp_path: Path):
+    """enhance_fn runs on the recorded wav before any verdict prompt."""
+    segs = (_two_seg_script()[0],)
+    inputs = _make_inputs(["", "y"])
+
+    record_calls: list[Path] = []
+    enhance_calls: list[Path] = []
+    play_calls: list[Path] = []
+
+    def fake_record(out_path, _ms, *, recorder=None):
+        record_calls.append(out_path)
+        out_path.write_bytes(b"RAW")
+
+    def fake_enhance(p: Path) -> None:
+        enhance_calls.append(p)
+        # Stand-in for "cleaned" content overwriting the same path
+        p.write_bytes(b"CLEANED")
+
+    accepted = run_interactive_capture(
+        segs, tmp_path, recorder="pw-record",
+        prompt_input=inputs, record_fn=fake_record,
+        play_fn=lambda p: play_calls.append(p),
+        enhance_fn=fake_enhance,
+    )
+    # enhance ran exactly once per record, on the same path, before any play.
+    assert len(record_calls) == 1
+    assert len(enhance_calls) == 1
+    assert enhance_calls[0] == record_calls[0]
+    # Accepted bytes are the enhanced output, not raw.
+    assert accepted[0][0].read_bytes() == b"CLEANED"
+
+
+def test_run_interactive_capture_falls_back_when_enhance_fails(tmp_path: Path, capsys):
+    """enhance_fn raises -> warning printed, raw bytes used for playback/accept."""
+    segs = (_two_seg_script()[0],)
+    inputs = _make_inputs(["", "y"])
+
+    def fake_record(out_path, _ms, *, recorder=None):
+        out_path.write_bytes(b"RAW-BYTES")
+
+    def boom(_p: Path) -> None:
+        raise RuntimeError("auphonic unreachable")
+
+    accepted = run_interactive_capture(
+        segs, tmp_path, recorder="pw-record",
+        prompt_input=inputs, record_fn=fake_record,
+        play_fn=lambda _p: None,
+        enhance_fn=boom,
+    )
+    assert accepted[0][0].read_bytes() == b"RAW-BYTES"
+    assert "enhance failed" in capsys.readouterr().err
+
+
 def test_run_interactive_capture_play_multiple_times(tmp_path: Path):
     """User plays back twice before accepting."""
     segs = (_two_seg_script()[0],)
