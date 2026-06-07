@@ -113,15 +113,6 @@ def _build_clone_parser() -> argparse.ArgumentParser:
     p.add_argument("--visibility", choices=["private", "unlist", "public"],
                    default="private",
                    help="Voice visibility on Fish (default: private).")
-    p.add_argument("--enhance", action=argparse.BooleanOptionalAction,
-                   default=False,
-                   help="Run each sample through Auphonic's breath/mouth-noise "
-                        "removal before uploading to Fish (default: OFF). "
-                        "Pass --enhance to opt in; requires `auphonic` on PATH "
-                        "and AUPHONIC_API_KEY in env. The default is off because "
-                        "Auphonic adds upload-and-poll latency per sample and "
-                        "consumes credits — opt in deliberately when you've "
-                        "decided the sample audio needs breath cleanup.")
     return p
 
 
@@ -157,34 +148,6 @@ def _clone_main(argv: list[str]) -> int:
             return 7
         sample_paths.append(recorded_path)
 
-    # Optional Auphonic enhance pass. Each sample (existing OR freshly
-    # recorded) gets cleaned in-place; failures fall back to the raw
-    # bytes so cloning still proceeds.
-    enhanced_temps: list[Path] = []
-    if args.enhance:
-        if not enhance.auphonic_available():
-            _log("warn: --enhance requested but auphonic CLI / "
-                 "AUPHONIC_API_KEY not available; uploading raw samples")
-        else:
-            cleaned_paths: list[Path] = []
-            for sp in sample_paths:
-                _cfd, _cstr = tempfile.mkstemp(
-                    prefix="tts-enhanced-", suffix=sp.suffix or ".wav",
-                )
-                os.close(_cfd)
-                cleaned = Path(_cstr)
-                try:
-                    _log(f"enhancing {sp.name} via auphonic...")
-                    enhance.enhance_with_auphonic(sp, cleaned)
-                    enhanced_temps.append(cleaned)
-                    cleaned_paths.append(cleaned)
-                except enhance.EnhanceError as e:
-                    _log(f"warn: enhance failed for {sp.name} ({e}); "
-                         "uploading raw")
-                    cleaned.unlink(missing_ok=True)
-                    cleaned_paths.append(sp)
-            sample_paths = cleaned_paths
-
     client = synthesize.make_client(api_key)
     try:
         voice_id = clone.clone_voice(
@@ -204,8 +167,6 @@ def _clone_main(argv: list[str]) -> int:
     finally:
         if recorded_path is not None and recorded_path.exists():
             recorded_path.unlink()
-        for t in enhanced_temps:
-            t.unlink(missing_ok=True)
 
     _log(f"cloned voice '{args.title}' -> reference_id:")
     print(voice_id)
