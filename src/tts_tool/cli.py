@@ -9,13 +9,15 @@ import tempfile
 from pathlib import Path
 
 from . import chunk as chunkmod
-from . import cache, clone, record, synthesize
+from . import cache, clone, enhance, record, record_interactive, synthesize
 from .stitch import StitchError, stitch_mp3s
 
-# Fish Audio voice library reference_id. Cloned from a 90s sample of
-# Jonathan Moregard reading English prose on 2026-05-26 via the clone
-# subcommand below. Switch with --voice-id or FISH_AUDIO_VOICE_ID env.
-DEFAULT_VOICE_ID = "282fa853838548af9803ed5b78226253"
+# Fish Audio voice library reference_id. Cloned from a 6-segment
+# register-varied interactive bundle (warmup / tender / playful /
+# reflective / stability / intimate) of Jonathan Moregard on
+# 2026-05-27 via `tts-tool record-clone`. Switch with --voice-id or
+# FISH_AUDIO_VOICE_ID env.
+DEFAULT_VOICE_ID = "91ab0b2241fa4514a35535e40108a59a"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,7 +44,23 @@ def _build_parser() -> argparse.ArgumentParser:
                         "produces 30-50 chunks; serial synth dominates wall "
                         "time. Higher concurrency trips Fish's per-key rate "
                         "limit (HTTP 429); 3 is empirically safe. 1 = strict "
-                        "serial.")
+                        "serial. Ignored when --prime-tail is set (chained "
+                        "synth is inherently sequential).")
+    p.add_argument("--prime-tail", type=float, default=None, metavar="SECONDS",
+                   help="Feed the last N seconds of chunk N as a "
+                        "ReferenceAudio to chunk N+1, reducing pitch drift. "
+                        "Priming chains across paragraph boundaries by "
+                        "default (empirically the win for prose-decorate "
+                        "output, where every chunk IS a paragraph). "
+                        "Typical: 2.0-3.0s. Forces sequential synth, "
+                        "breaks concurrency. Requires ffmpeg + ffprobe "
+                        "on PATH.")
+    p.add_argument("--prime-reset-paragraph", action="store_true",
+                   help="Reset --prime-tail at paragraph breaks (chunks "
+                        "with silence_after > 0). Reverts the pre-2026-05-27 "
+                        "behavior. Pick when cross-paragraph priming pulls "
+                        "the pitch across a pause in a way that fights the "
+                        "intended cadence.")
     return p
 
 
@@ -119,7 +137,9 @@ def _clone_main(argv: list[str]) -> int:
         except record.RecordError as e:
             _log(f"error: {e}")
             return 7
-        recorded_path = Path(tempfile.mkstemp(prefix="tts-clone-", suffix=".wav")[1])
+        _fd, _rec_str = tempfile.mkstemp(prefix="tts-clone-", suffix=".wav")
+        os.close(_fd)
+        recorded_path = Path(_rec_str)
         _log(f"recording {args.record:.0f}s via {rec} -> {recorded_path}")
         try:
             record.record_wav(recorded_path, args.record, recorder=rec)
@@ -155,11 +175,125 @@ def _clone_main(argv: list[str]) -> int:
     return 0
 
 
+def _build_record_clone_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="tts-tool record-clone",
+        description="Interactive multi-segment voice cloning. Walks you through "
+                    "a register-varied script (warmup / tender / playful / "
+                    "reflective / stability / intimate), recording each segment "
+                    "with stop-on-ENTER and per-segment accept/redo prompts. "
+                    "Bundles the accepted takes into one Fish Audio voice model.",
+    )
+    p.add_argument("--title", type=str, required=True,
+                   help="Human-readable name for the cloned voice.")
+    p.add_argument("--speaker-name", type=str, default="",
+                   help="First name of the speaker. Substituted into the "
+                        "warmup segment's '{name}' placeholder. Omit for "
+                        "anonymous cloning (the name introduction is "
+                        "dropped from the script).")
+    p.add_argument("--description", type=str, default=None,
+                   help="Optional description in your Fish voice library.")
+    p.add_argument("--visibility", choices=["private", "unlist", "public"],
+                   default="private",
+                   help="Voice visibility on Fish (default: private).")
+    p.add_argument("--keep-takes", action="store_true",
+                   help="Keep the per-segment WAVs on disk after upload "
+                        "(under --work-dir). Default: delete on success.")
+    p.add_argument("--work-dir", type=Path, default=None,
+                   help="Where to write per-segment WAVs (default: a temp dir).")
+    return p
+
+
+def _clone_interactive_main(argv: list[str]) -> int:
+    args = _build_record_clone_parser().parse_args(argv)
+
+    try:
+        api_key = synthesize.read_api_key()
+    except synthesize.MissingAPIKey as e:
+        _log(f"error: {e}")
+        return 5
+
+    try:
+        recorder = record.find_recorder()
+    except record.RecordError as e:
+        _log(f"error: {e}")
+        return 7
+
+    work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="tts-record-clone-"))
+
+    # Enhance is a per-take interactive option, not a session default. If
+    # auphonic is reachable we expose enhance_fn to the interactive
+    # capture loop; the per-take verdict prompt then offers (e)nhance /
+    # (u)nenhance toggles. If auphonic isn't reachable, enhance_fn=None
+    # and those options vanish from the menu entirely. enhance_with_auphonic
+    # takes (in_path, out_path); record_interactive writes to
+    # `<basename>.enhanced.wav` so raw + cleaned coexist on disk and the
+    # (e)/(u) toggle is free after the first (e).
+    enhance_fn = None
+    if enhance.auphonic_available():
+        enhance_fn = enhance.enhance_with_auphonic
+    else:
+        _log("note: auphonic CLI / AUPHONIC_API_KEY not configured; "
+             "(e)nhance option will not appear in the per-take prompt")
+
+    try:
+        accepted = record_interactive.run_interactive_capture(
+            record_interactive.DEFAULT_SCRIPT,
+            work_dir,
+            recorder=recorder,
+            speaker_name=args.speaker_name,
+            enhance_fn=enhance_fn,
+        )
+    except KeyboardInterrupt:
+        _log("aborted by user")
+        return 130
+
+    if not accepted:
+        _log("error: no segments accepted, nothing to upload")
+        return 6
+
+    _log(f"uploading {len(accepted)} accepted segments to Fish Audio...")
+    sample_paths = [w for w, _ in accepted]
+    texts = [t for _, t in accepted]
+
+    client = synthesize.make_client(api_key)
+    try:
+        voice_id = clone.clone_voice(
+            client,
+            title=args.title,
+            sample_paths=sample_paths,
+            description=args.description,
+            texts=texts,
+            visibility=args.visibility,
+        )
+    except clone.CloneError as e:
+        _log(f"error: {e}")
+        return 6
+    except Exception as e:
+        _log(f"error: Fish Audio clone failed: {e}")
+        return 1
+    finally:
+        if not args.keep_takes and args.work_dir is None:
+            for w in sample_paths:
+                try:
+                    w.unlink()
+                except OSError:
+                    pass
+
+    _log(f"cloned voice '{args.title}' from {len(accepted)} segments -> reference_id:")
+    print(voice_id)
+    _log("use with: tts-tool --voice-id " + voice_id)
+    _log("or set: export FISH_AUDIO_VOICE_ID=" + voice_id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "clone":
         return _clone_main(argv[1:])
+    if argv and argv[0] == "record-clone":
+        return _clone_interactive_main(argv[1:])
 
     args = _build_parser().parse_args(argv)
 
@@ -194,33 +328,31 @@ def main(argv: list[str] | None = None) -> int:
     n = len(chunks)
     audio_per_chunk: list[bytes | None] = [None] * n
     cache_hits = 0
-    to_synth: list[tuple[int, object, str]] = []  # (slot, chunk, cache_key)
-    for slot, c in enumerate(chunks):
-        key = cache.key_for(c.text, model, voice_id, speed)
-        cached = None if args.no_cache else cache.get(cdir, key)
-        if cached is not None:
-            cache_hits += 1
-            _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
-            audio_per_chunk[slot] = cached
-            continue
-        to_synth.append((slot, c, key))
 
-    if to_synth:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        concurrency = max(1, args.concurrency)
-        _log(f"synthesizing {len(to_synth)} chunks (concurrency={concurrency})")
-
-        def _do_one(slot: int, c, key: str):
-            audio = synthesize.synthesize_chunk(
-                client, c.text, model=model, voice_id=voice_id, speed=speed,
-            )
-            return slot, c, key, audio
-
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = [ex.submit(_do_one, slot, c, key) for slot, c, key in to_synth]
-            for fut in as_completed(futures):
+    if args.prime_tail is not None and args.prime_tail > 0:
+        # Sequential prime-tail mode. Each chunk's tail conditions the
+        # next chunk's synthesis. Resets at silence_after > 0 (paragraph
+        # boundary) so cross-paragraph priming doesn't compete with the
+        # natural pause.
+        from .tail_extract import TailExtractError, tail_seconds
+        _log(f"synthesizing {n} chunks (prime-tail={args.prime_tail:.1f}s, "
+             "sequential)")
+        prev_tail: bytes | None = None
+        for slot, c in enumerate(chunks):
+            key = cache.key_for(c.text, model, voice_id, speed,
+                                prime_tail=prev_tail)
+            cached = None if args.no_cache else cache.get(cdir, key)
+            if cached is not None:
+                cache_hits += 1
+                _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
+                audio_per_chunk[slot] = cached
+            else:
                 try:
-                    slot, c, key, audio = fut.result()
+                    audio = synthesize.synthesize_chunk(
+                        client, c.text,
+                        model=model, voice_id=voice_id, speed=speed,
+                        prime_tail=prev_tail,
+                    )
                 except Exception as e:
                     _log(f"error: Fish Audio synthesis failed: {e}")
                     return 1
@@ -228,6 +360,59 @@ def main(argv: list[str] | None = None) -> int:
                     cache.put(cdir, key, audio)
                 audio_per_chunk[slot] = audio
                 _log(f"chunk {c.index + 1}/{n}: done ({len(c.text)} chars)")
+
+            # Decide tail for the NEXT chunk. Chain through paragraph breaks
+            # by default; reset only when --prime-reset-paragraph opt-out
+            # was requested.
+            if c.silence_after > 0 and args.prime_reset_paragraph:
+                prev_tail = None
+            else:
+                try:
+                    prev_tail = tail_seconds(
+                        audio_per_chunk[slot], args.prime_tail
+                    )
+                except TailExtractError as e:
+                    _log(f"warn: tail extract failed ({e}); resetting prime")
+                    prev_tail = None
+    else:
+        to_synth: list[tuple[int, object, str]] = []
+        for slot, c in enumerate(chunks):
+            key = cache.key_for(c.text, model, voice_id, speed)
+            cached = None if args.no_cache else cache.get(cdir, key)
+            if cached is not None:
+                cache_hits += 1
+                _log(f"chunk {c.index + 1}/{n}: cache hit ({len(c.text)} chars)")
+                audio_per_chunk[slot] = cached
+                continue
+            to_synth.append((slot, c, key))
+
+        if to_synth:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            concurrency = max(1, args.concurrency)
+            _log(f"synthesizing {len(to_synth)} chunks "
+                 f"(concurrency={concurrency})")
+
+            def _do_one(slot: int, c, key: str):
+                audio = synthesize.synthesize_chunk(
+                    client, c.text,
+                    model=model, voice_id=voice_id, speed=speed,
+                )
+                return slot, c, key, audio
+
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = [ex.submit(_do_one, slot, c, key)
+                           for slot, c, key in to_synth]
+                for fut in as_completed(futures):
+                    try:
+                        slot, c, key, audio = fut.result()
+                    except Exception as e:
+                        _log(f"error: Fish Audio synthesis failed: {e}")
+                        return 1
+                    if not args.no_cache:
+                        cache.put(cdir, key, audio)
+                    audio_per_chunk[slot] = audio
+                    _log(f"chunk {c.index + 1}/{n}: done "
+                         f"({len(c.text)} chars)")
 
     # All slots must be filled by now (cache hit or successful synth).
     assert all(a is not None for a in audio_per_chunk), "synth slot left empty"

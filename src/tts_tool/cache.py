@@ -19,8 +19,18 @@ def chunks_dir(override: str | os.PathLike[str] | None = None) -> Path:
     return out
 
 
-def key_for(text: str, model: str, voice_id: str | None, speed: float) -> str:
+def key_for(
+    text: str,
+    model: str,
+    voice_id: str | None,
+    speed: float,
+    prime_tail: bytes | None = None,
+) -> str:
+    """Cache key. `prime_tail`, when supplied, makes the key sensitive to
+    the previous chunk's tail bytes so --prime-tail runs cache correctly."""
     payload = f"{text}|{model}|{voice_id or ''}|{speed:.4f}".encode("utf-8")
+    if prime_tail:
+        payload += b"|tail:" + hashlib.sha256(prime_tail).digest()
     return hashlib.sha256(payload).hexdigest()
 
 

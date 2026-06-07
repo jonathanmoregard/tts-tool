@@ -9,18 +9,39 @@ substack-url-tool "$URL" | tts-tool -o article.mp3
 
 ## Voice cloning
 
+Three flows, all wrapping Fish Audio's `voices.create`:
+
 ```sh
-# From an existing recording:
+# A. From an existing recording:
 tts-tool clone --sample me.wav --title "My voice"
 
-# Captured inline (60s via pw-record / arecord / ffmpeg):
+# B. Inline capture (single clip, pw-record / arecord / ffmpeg):
 tts-tool clone --record 60 --title "My voice"
 
-# Both (combined into one upload):
-tts-tool clone --sample me.wav --record 30 --title "My voice"
+# C. Interactive multi-segment (recommended for expressive clones):
+tts-tool record-clone --title "My voice" --speaker-name "Jonathan"
+
+# Anonymous (no name in the script):
+tts-tool record-clone --title "Some-voice"
 ```
 
-Prints the new Fish Audio `reference_id`. Plug into synth via
+`record-clone` walks you through six register-varied segments (warmup,
+tender, playful, reflective, stability, intimate). Stop-on-ENTER per
+segment, then (p)lay / (y)es / (r)edo / (s)kip / (q)uit. Bundles
+all accepted takes into one upload with transcripts — gives the
+embedding phonetic + prosodic breadth without forcing a single
+4-minute take. Script is person-neutral; `--speaker-name` fills in
+the warmup introduction, or omit it for anonymous cloning.
+
+`--enhance` (default on) runs each take through Auphonic's
+breath/mouth-noise removal before playback, so the verdict and the
+upload both reflect the cleaned audio. Requires `auphonic` on PATH
+and `AUPHONIC_API_KEY` in env; the tool warns and falls back to raw
+if either is missing, and any per-take enhance failure also falls
+back to the raw recording so the flow never blocks. Pass
+`--no-enhance` to keep raw bytes throughout.
+
+All three print the new Fish Audio `reference_id`. Plug into synth via
 `--voice-id ID` or `export FISH_AUDIO_VOICE_ID=ID`.
 
 ## Install (dev)
@@ -52,6 +73,28 @@ API key from `config.age.secrets.fish-audio-api-key.path` via a wrapper.
 | `FISH_AUDIO_VOICE_ID` | (SDK default) | Voice library `reference_id` |
 | `LISTEN_SPEED` | `1.0` | Prosody speed, 0.8 - 1.2 |
 | `LISTEN_CACHE_DIR` | platformdirs cache | Chunk MP3 cache location |
+
+## --prime-tail (pitch continuity)
+
+Long-form synth of cloned voices drifts in pitch between chunks
+(diffusion stochasticity + independent per-chunk inference). Pass
+`--prime-tail SECONDS` to feed the last N seconds of chunk N as a
+`ReferenceAudio` to chunk N+1. Fish refines the speaker embedding
+per call to match the tail's timbre, reducing inter-chunk pitch jumps.
+
+```sh
+substack-url-tool "$URL" | prose-decorate \
+  | tts-tool --prime-tail 2.5 -o article.mp3
+```
+
+Priming chains across paragraph boundaries by default — empirically
+the win for prose-decorate output, where every chunk IS a paragraph
+and per-paragraph reset means priming never engages. Pass
+`--prime-reset-paragraph` to revert (priming resets at chunks with
+`silence_after > 0`).
+
+Forces sequential synth (`-j` ignored), ~3x slower than the default
+parallel path. Needs `ffmpeg` + `ffprobe` on PATH for tail slicing.
 
 ## How it works
 
