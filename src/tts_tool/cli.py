@@ -114,11 +114,14 @@ def _build_clone_parser() -> argparse.ArgumentParser:
                    default="private",
                    help="Voice visibility on Fish (default: private).")
     p.add_argument("--enhance", action=argparse.BooleanOptionalAction,
-                   default=True,
+                   default=False,
                    help="Run each sample through Auphonic's breath/mouth-noise "
-                        "removal before uploading to Fish (default: on). "
-                        "Requires `auphonic` on PATH and AUPHONIC_API_KEY in env. "
-                        "Pass --no-enhance to upload raw bytes unchanged.")
+                        "removal before uploading to Fish (default: OFF). "
+                        "Pass --enhance to opt in; requires `auphonic` on PATH "
+                        "and AUPHONIC_API_KEY in env. The default is off because "
+                        "Auphonic adds upload-and-poll latency per sample and "
+                        "consumes credits — opt in deliberately when you've "
+                        "decided the sample audio needs breath cleanup.")
     return p
 
 
@@ -237,13 +240,6 @@ def _build_record_clone_parser() -> argparse.ArgumentParser:
                         "(under --work-dir). Default: delete on success.")
     p.add_argument("--work-dir", type=Path, default=None,
                    help="Where to write per-segment WAVs (default: a temp dir).")
-    p.add_argument("--enhance", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="Run each take through Auphonic's breath/mouth-noise "
-                        "removal between recording and playback (default: on). "
-                        "The 'p' verdict plays the cleaned take, accept stores "
-                        "the cleaned take. Requires `auphonic` on PATH and "
-                        "AUPHONIC_API_KEY in env. Pass --no-enhance to keep raw.")
     return p
 
 
@@ -264,18 +260,20 @@ def _clone_interactive_main(argv: list[str]) -> int:
 
     work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="tts-record-clone-"))
 
+    # Enhance is a per-take interactive option, not a session default. If
+    # auphonic is reachable we expose enhance_fn to the interactive
+    # capture loop; the per-take verdict prompt then offers (e)nhance /
+    # (u)nenhance toggles. If auphonic isn't reachable, enhance_fn=None
+    # and those options vanish from the menu entirely. enhance_with_auphonic
+    # takes (in_path, out_path); record_interactive writes to
+    # `<basename>.enhanced.wav` so raw + cleaned coexist on disk and the
+    # (e)/(u) toggle is free after the first (e).
     enhance_fn = None
-    if args.enhance:
-        if enhance.auphonic_available():
-            # record_interactive calls enhance_fn(wav) with one positional arg
-            # and expects the path to be cleaned in place. enhance_with_auphonic
-            # takes (in_path, out_path) so we bind them to the same Path here;
-            # the implementation reads in, downloads to a tempdir, and writes
-            # out as the last step, so in == out is safe.
-            enhance_fn = lambda p: enhance.enhance_with_auphonic(p, p)
-        else:
-            _log("warn: --enhance requested but auphonic CLI / "
-                 "AUPHONIC_API_KEY not available; takes will not be cleaned")
+    if enhance.auphonic_available():
+        enhance_fn = enhance.enhance_with_auphonic
+    else:
+        _log("note: auphonic CLI / AUPHONIC_API_KEY not configured; "
+             "(e)nhance option will not appear in the per-take prompt")
 
     try:
         accepted = record_interactive.run_interactive_capture(

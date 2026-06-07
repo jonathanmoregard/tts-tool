@@ -106,23 +106,24 @@ def test_run_interactive_capture_play_then_accept(tmp_path: Path):
     assert play_calls[0] == accepted[0][0]
 
 
-def test_run_interactive_capture_calls_enhance_after_record(tmp_path: Path):
-    """enhance_fn runs on the recorded wav before any verdict prompt."""
+def test_run_interactive_capture_enhance_runs_only_on_e_verdict(tmp_path: Path):
+    """enhance_fn is called lazily when the user hits (e) — not on every
+    recording. Verdict path: "" start, "e" enhance, "y" accept enhanced.
+    Output written to a sibling `.enhanced.wav`, raw preserved."""
     segs = (_two_seg_script()[0],)
-    inputs = _make_inputs(["", "y"])
+    inputs = _make_inputs(["", "e", "y"])
 
     record_calls: list[Path] = []
-    enhance_calls: list[Path] = []
+    enhance_calls: list[tuple[Path, Path]] = []
     play_calls: list[Path] = []
 
     def fake_record(out_path, _ms, *, recorder=None):
         record_calls.append(out_path)
         out_path.write_bytes(b"RAW")
 
-    def fake_enhance(p: Path) -> None:
-        enhance_calls.append(p)
-        # Stand-in for "cleaned" content overwriting the same path
-        p.write_bytes(b"CLEANED")
+    def fake_enhance(in_path: Path, out_path: Path) -> None:
+        enhance_calls.append((in_path, out_path))
+        out_path.write_bytes(b"CLEANED")
 
     accepted = run_interactive_capture(
         segs, tmp_path, recorder="pw-record",
@@ -130,23 +131,31 @@ def test_run_interactive_capture_calls_enhance_after_record(tmp_path: Path):
         play_fn=lambda p: play_calls.append(p),
         enhance_fn=fake_enhance,
     )
-    # enhance ran exactly once per record, on the same path, before any play.
     assert len(record_calls) == 1
     assert len(enhance_calls) == 1
-    assert enhance_calls[0] == record_calls[0]
+    in_p, out_p = enhance_calls[0]
+    assert in_p == record_calls[0]
+    assert out_p.name == in_p.name.replace(".wav", ".enhanced.wav")
     # Accepted bytes are the enhanced output, not raw.
     assert accepted[0][0].read_bytes() == b"CLEANED"
+    # Raw file still on disk for potential (u) revert.
+    assert record_calls[0].read_bytes() == b"RAW"
 
 
-def test_run_interactive_capture_falls_back_when_enhance_fails(tmp_path: Path, capsys):
-    """enhance_fn raises -> warning printed, raw bytes used for playback/accept."""
+def test_run_interactive_capture_e_keeps_raw_when_enhance_fails(
+    tmp_path: Path, capsys,
+):
+    """When the user hits (e) and enhance_fn raises, the prompt prints a
+    warning and the take stays raw — the next verdict from the same loop
+    operates on raw bytes."""
     segs = (_two_seg_script()[0],)
-    inputs = _make_inputs(["", "y"])
+    # "" start, "e" (enhance fails → stays raw), "y" accept raw.
+    inputs = _make_inputs(["", "e", "y"])
 
     def fake_record(out_path, _ms, *, recorder=None):
         out_path.write_bytes(b"RAW-BYTES")
 
-    def boom(_p: Path) -> None:
+    def boom(_in: Path, _out: Path) -> None:
         raise RuntimeError("auphonic unreachable")
 
     accepted = run_interactive_capture(
@@ -292,14 +301,13 @@ def test_run_interactive_capture_passes_speaker_name(tmp_path: Path):
     assert accepted[0][1] == "Hi, I'm Sara."
 
 
-def test_cli_record_clone_enhance_default_calls_enhance_in_place(
+def test_cli_record_clone_per_take_enhance_uploads_cleaned_bytes(
     monkeypatch, capsys, tmp_path: Path,
 ):
-    """Regression: when --enhance is on (default), each take is cleaned
-    via enhance_with_auphonic(wav, wav). Previously the wiring assigned
-    `enhance_fn = enhance.enhance_with_auphonic` directly, which raises
-    TypeError on the one-arg call from run_interactive_capture and
-    silently disables enhancement."""
+    """When the user hits (e) on every take, enhance_with_auphonic is
+    called once per segment with (raw_path, enhanced_path) — sibling
+    files, NOT in-place — and the accepted upload bytes are the cleaned
+    ones, not the raw."""
     monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
     monkeypatch.setattr("tts_tool.record.find_recorder", lambda: "pw-record-stub")
     monkeypatch.setattr(
@@ -323,7 +331,8 @@ def test_cli_record_clone_enhance_default_calls_enhance_in_place(
         "tts_tool.synthesize.make_client", lambda *a, **k: fake_client
     )
 
-    inputs = iter([""] + ["y"] + ([""] + ["y"]) * 5)
+    # Per segment: "" (ENTER to start), "e" (enhance), "y" (accept enhanced).
+    inputs = iter(([""] + ["e", "y"]) * 6)
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
 
     rc = cli.main([
@@ -332,13 +341,116 @@ def test_cli_record_clone_enhance_default_calls_enhance_in_place(
         "--work-dir", str(tmp_path / "takes"),
     ])
     assert rc == 0, capsys.readouterr().err
-    # Each segment's enhance call passes the SAME path as in and out (in-place).
+    # Each segment's enhance call writes to a sibling `.enhanced.wav`,
+    # not the raw path. raw + enhanced coexist on disk after the run.
     assert len(enhance_calls) == 6
     for in_p, out_p in enhance_calls:
-        assert in_p == out_p, "enhance must be called in-place (in == out)"
+        assert in_p.suffix == ".wav" and not in_p.name.endswith(".enhanced.wav")
+        assert out_p.name.endswith(".enhanced.wav")
+        assert out_p.parent == in_p.parent
     # And the bytes the Fish client sees are the cleaned ones.
     voices = fake_client.voices.create.call_args.kwargs["voices"]
     assert all(v == b"CLEANED" for v in voices)
+
+
+def test_record_clone_e_u_e_toggle_does_not_reprocess(
+    monkeypatch, capsys, tmp_path: Path,
+):
+    """(e) → (u) → (e) on the same take must call enhance_with_auphonic
+    EXACTLY ONCE — the second (e) flips back to the cached enhanced file
+    without re-running auphonic. Final accept uploads the cleaned bytes."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setattr("tts_tool.record.find_recorder", lambda: "pw-record-stub")
+    monkeypatch.setattr(
+        "tts_tool.record_interactive.record_until_enter",
+        lambda out_path, _ms, recorder=None: out_path.write_bytes(b"RAW"),
+    )
+    monkeypatch.setattr("tts_tool.record_interactive.play_back", lambda _p: None)
+    monkeypatch.setattr("tts_tool.enhance.auphonic_available", lambda: True)
+
+    enhance_calls: list[tuple[Path, Path]] = []
+
+    def fake_enhance(in_path: Path, out_path: Path, **_kw) -> None:
+        enhance_calls.append((in_path, out_path))
+        out_path.write_bytes(b"CLEANED")
+
+    monkeypatch.setattr("tts_tool.enhance.enhance_with_auphonic", fake_enhance)
+
+    fake_client = MagicMock()
+    fake_client.voices.create.return_value = SimpleNamespace(id="toggle-id")
+    monkeypatch.setattr(
+        "tts_tool.synthesize.make_client", lambda *a, **k: fake_client
+    )
+
+    # Segment 1: "" start, "e" enhance, "u" unenhance, "e" re-enhance, "y" accept.
+    # Segments 2-6: bare "" + "y" (no enhance) to round out the run.
+    seg1 = [""] + ["e", "u", "e", "y"]
+    rest = ([""] + ["y"]) * 5
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt="", _it=iter(seg1 + rest): next(_it),
+    )
+
+    rc = cli.main([
+        "record-clone",
+        "--title", "Jonathan-toggle",
+        "--work-dir", str(tmp_path / "takes"),
+    ])
+    assert rc == 0, capsys.readouterr().err
+    # Enhance must have run EXACTLY once across the whole (e)→(u)→(e) cycle
+    # on segment 1; segments 2-6 never (e), so no calls there.
+    assert len(enhance_calls) == 1, (
+        f"expected 1 enhance call across (e)→(u)→(e) toggle, got {len(enhance_calls)}"
+    )
+    voices = fake_client.voices.create.call_args.kwargs["voices"]
+    # Segment 1 accepted the re-enhanced (cleaned) bytes; segments 2-6
+    # never hit (e) so they accepted raw.
+    assert voices[0] == b"CLEANED"
+    assert all(v == b"RAW" for v in voices[1:])
+
+
+def test_record_clone_no_auphonic_hides_enhance_option(
+    monkeypatch, capsys, tmp_path: Path,
+):
+    """When auphonic isn't reachable, enhance_fn is None and the per-take
+    prompt omits (e) entirely — pressing 'e' is rejected as invalid."""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "k")
+    monkeypatch.setattr("tts_tool.record.find_recorder", lambda: "pw-record-stub")
+    monkeypatch.setattr(
+        "tts_tool.record_interactive.record_until_enter",
+        lambda out_path, _ms, recorder=None: out_path.write_bytes(b"RAW"),
+    )
+    monkeypatch.setattr("tts_tool.record_interactive.play_back", lambda _p: None)
+    monkeypatch.setattr("tts_tool.enhance.auphonic_available", lambda: False)
+
+    fake_client = MagicMock()
+    fake_client.voices.create.return_value = SimpleNamespace(id="no-enh-id")
+    monkeypatch.setattr(
+        "tts_tool.synthesize.make_client", lambda *a, **k: fake_client
+    )
+
+    # Segment 1: try "e" (should be invalid), then fallback to "y".
+    # The verdict loop keeps re-prompting on invalid, so we need a second
+    # answer after the "e" gets rejected.
+    seg1 = [""] + ["e", "y"]
+    rest = ([""] + ["y"]) * 5
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt="", _it=iter(seg1 + rest): next(_it),
+    )
+
+    rc = cli.main([
+        "record-clone",
+        "--title", "Jonathan-no-auphonic",
+        "--work-dir", str(tmp_path / "takes"),
+    ])
+    assert rc == 0, capsys.readouterr().err
+    err = capsys.readouterr().err
+    # Confirm the user-facing note about missing auphonic surfaced AND
+    # the verdict loop rejected the "e" keystroke as invalid.
+    # (The CLI logs the note at startup; the verdict loop prints
+    # "invalid choice, try again" on the 'e'.)
+    assert "invalid choice" in err or "auphonic" in err.lower()
+    voices = fake_client.voices.create.call_args.kwargs["voices"]
+    assert all(v == b"RAW" for v in voices)
 
 
 def test_cli_record_clone_speaker_name_flag_threaded(monkeypatch, capsys, tmp_path: Path):

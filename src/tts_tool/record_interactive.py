@@ -200,21 +200,41 @@ def play_back(path: Path) -> None:
     )
 
 
-def prompt_verdict(prompt_input=None) -> str:
+def prompt_verdict(
+    prompt_input=None,
+    *,
+    is_enhanced: bool = False,
+    enhance_available: bool = False,
+) -> str:
     """Ask user to (p)lay / (y) accept / (r) redo / (s) skip / (q) quit.
 
     Default is (r)edo — empty input re-records, since the speaker typically
     knows mid-recording whether they slipped up and shouldn't have to
     type anything to retry. (p) plays the take back through mpv.
+
+    When `enhance_available` is True (auphonic CLI + key reachable), the
+    prompt shows EITHER `enhance (e)` (when currently raw) OR
+    `unenhance (u)` (when currently enhanced). The toggle is free after
+    the first (e) — the enhanced file is cached on disk and (u) just
+    flips which version is the "active" one for (p)/(y).
     """
     if prompt_input is None:
         prompt_input = input
     while True:
+        toggle_segment = ""
+        if enhance_available:
+            toggle_segment = (
+                " / unenhance (u)" if is_enhanced else " / enhance (e)"
+            )
         raw = prompt_input(
-            "play (p) / accept (y) / redo (r) / skip (s) / quit (q)? [r]: "
+            f"play (p) / accept (y) / redo (r){toggle_segment} / "
+            f"skip (s) / quit (q)? [r]: "
         )
         choice = (raw or "r").strip().lower()[:1]
-        if choice in {"p", "y", "r", "s", "q"}:
+        valid = {"p", "y", "r", "s", "q"}
+        if enhance_available:
+            valid.add("u" if is_enhanced else "e")
+        if choice in valid:
             return choice
         print("invalid choice, try again", file=sys.stderr)
 
@@ -232,11 +252,16 @@ def run_interactive_capture(
 ) -> list[tuple[Path, str]]:
     """Walk segments, recording each with user accept/redo prompt.
 
-    If `enhance_fn` is given, it is called on every fresh recording after
-    record_fn returns and before play_fn is offered. enhance_fn(path) is
-    expected to overwrite `path` with a cleaned-up version (e.g. via
-    Auphonic). A failed enhance falls back to playing the raw recording
-    with a warning — the user still gets to accept/redo something.
+    Enhancement is per-take, opt-in via the (e) verdict choice. When
+    `enhance_fn` is provided AND the user hits (e), enhance_fn is called
+    ONCE on the raw recording — its output written to a sibling
+    `<basename>.enhanced.wav`. (p) / (y) then operate on the enhanced
+    version. (u) flips back to raw; (e) again flips forward — both
+    toggles are free (no re-processing). enhance_fn(in_path, out_path)
+    overwrites out_path with the cleaned bytes.
+
+    `enhance_fn=None` removes (e) from the per-take menu entirely (the
+    CLI sets this when auphonic isn't reachable).
 
     Returns a list of (wav_path, transcript) for every accepted segment,
     in script order, skipping any the user dropped with (s). Exits early
@@ -262,29 +287,60 @@ def run_interactive_capture(
                 f"press ENTER to start recording (max {seg.max_seconds:.0f}s, "
                 "ENTER again to stop): "
             )
-            wav = work_dir / f"{idx:02d}-{seg.label}.wav"
-            record_fn(wav, seg.max_seconds, recorder=recorder)
+            raw_wav = work_dir / f"{idx:02d}-{seg.label}.wav"
+            enhanced_wav = work_dir / f"{idx:02d}-{seg.label}.enhanced.wav"
+            record_fn(raw_wav, seg.max_seconds, recorder=recorder)
 
-            if enhance_fn is not None:
-                try:
-                    enhance_fn(wav)
-                    print(f"enhanced: {wav.name}", file=sys.stderr)
-                except Exception as e:
-                    print(
-                        f"warning: enhance failed ({e}); playing raw take",
-                        file=sys.stderr,
-                    )
+            # Per-take enhance state. Lazily materialized when user hits
+            # (e) the FIRST time. After that, (e)/(u) toggles the active
+            # flag for free — the enhanced file stays on disk and the
+            # toggle just decides which path gets passed to play / accept.
+            is_enhanced = False
+            enhanced_built = False
 
-            # Verdict loop: 'p' replays without re-recording, all other
-            # choices break out (either to next segment or back to re-record).
+            def active_path() -> Path:
+                return enhanced_wav if is_enhanced else raw_wav
+
+            # Verdict loop: 'p' replays without re-recording, 'e'/'u'
+            # toggle enhanced version, all other choices break out
+            # (either to next segment or back to re-record).
             advance = False
             while not advance:
-                v = prompt_verdict(prompt_input=prompt_input)
+                v = prompt_verdict(
+                    prompt_input=prompt_input,
+                    is_enhanced=is_enhanced,
+                    enhance_available=(enhance_fn is not None),
+                )
                 if v == "p":
-                    play_fn(wav)
+                    play_fn(active_path())
+                    continue
+                if v == "e":
+                    if not enhanced_built:
+                        try:
+                            enhance_fn(raw_wav, enhanced_wav)
+                            enhanced_built = True
+                            print(
+                                f"enhanced: {enhanced_wav.name}",
+                                file=sys.stderr,
+                            )
+                        except Exception as exc:
+                            print(
+                                f"warning: enhance failed ({exc}); "
+                                "staying with raw take",
+                                file=sys.stderr,
+                            )
+                            continue
+                    is_enhanced = True
+                    continue
+                if v == "u":
+                    is_enhanced = False
+                    print(
+                        f"reverted: {raw_wav.name} (raw)",
+                        file=sys.stderr,
+                    )
                     continue
                 if v == "y":
-                    accepted.append((wav, text))
+                    accepted.append((active_path(), text))
                     advance = True
                 elif v == "r":
                     advance = False
